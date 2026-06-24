@@ -142,43 +142,13 @@ static std::string hbyte_to_str(uint8_t b) {
 
 // ─── setup() ─────────────────────────────────────────────────────────────────
 void TclClimate::setup() {
-  // Traits: unterstützte Modi, Schwenkmodi, Lüfterstufen
-  auto traits = this->get_traits();
-
-  traits.set_supports_current_temperature(true);
-  traits.set_visual_min_temperature(16.0f);
-  traits.set_visual_max_temperature(31.0f);
-  traits.set_visual_temperature_step(0.5f);
-
-  traits.set_supported_modes({
-    climate::CLIMATE_MODE_OFF,
-    climate::CLIMATE_MODE_HEAT,
-    climate::CLIMATE_MODE_COOL,
-    climate::CLIMATE_MODE_DRY,
-    climate::CLIMATE_MODE_FAN_ONLY,
-    climate::CLIMATE_MODE_HEAT_COOL,
-  });
-
-  traits.set_supported_fan_modes({
-    climate::CLIMATE_FAN_AUTO,
-    climate::CLIMATE_FAN_LOW,
-    climate::CLIMATE_FAN_MEDIUM,
-    climate::CLIMATE_FAN_HIGH,
-  });
-
-  // Alle vier Schwenkmodi anbieten
-  traits.set_supported_swing_modes({
-    climate::CLIMATE_SWING_OFF,
-    climate::CLIMATE_SWING_VERTICAL,
-    climate::CLIMATE_SWING_HORIZONTAL,
-    climate::CLIMATE_SWING_BOTH,
-  });
-
-  this->set_traits(traits);
+  // Traits werden nur über traits() definiert – setup() braucht keine Kopie.
+  // Callbacks für die Select-Widgets:
 
   // Vane-Select-Callbacks registrieren
   if (this->vswing_select_ != nullptr) {
-    this->vswing_select_->add_on_state_callback([this](const std::string &value, size_t) {
+    this->vswing_select_->add_on_state_callback([this](uint32_t) {
+      const std::string &value = this->vswing_select_->state;
       ESP_LOGD(TAG, "Vertical vane select changed: %s", value.c_str());
       this->vane_vertical_pos_ = vswing_str_to_byte(value);
       // Swing-Mode im Climate-State synchronisieren
@@ -200,7 +170,8 @@ void TclClimate::setup() {
   }
 
   if (this->hswing_select_ != nullptr) {
-    this->hswing_select_->add_on_state_callback([this](const std::string &value, size_t) {
+    this->hswing_select_->add_on_state_callback([this](uint32_t) {
+      const std::string &value = this->hswing_select_->state;
       ESP_LOGD(TAG, "Horizontal vane select changed: %s", value.c_str());
       this->vane_horizontal_pos_ = hswing_str_to_byte(value);
       // Swing-Mode im Climate-State synchronisieren
@@ -312,7 +283,8 @@ void TclClimate::control(const climate::ClimateCall &call) {
 // ─── traits() ────────────────────────────────────────────────────────────────
 climate::ClimateTraits TclClimate::traits() {
   auto t = climate::ClimateTraits();
-  t.set_supports_current_temperature(true);
+  // Ab ESPHome 2026.5: add_feature_flags statt set_supports_current_temperature
+  t.add_feature_flags(climate::CLIMATE_SUPPORTS_CURRENT_TEMPERATURE);
   t.set_visual_min_temperature(16.0f);
   t.set_visual_max_temperature(31.0f);
   t.set_visual_temperature_step(0.5f);

@@ -2,7 +2,8 @@
 tcl_climate/__init__.py
 
 ESPHome Custom Component für TCL/Kesser/Pioneer/DAIZUKI Klimaanlagen.
-Unterstützt ab ESPHome 2026.6.x vertikale UND horizontale Lamellensteuerung.
+Unterstützt ESPHome 2025.11.0+ / 2026.x (climate.CLIMATE_SCHEMA entfernt,
+jetzt climate.climate_schema(...) verwenden).
 """
 
 import esphome.codegen as cg
@@ -22,12 +23,12 @@ TclClimate = tcl_climate_ns.class_(
 CONF_VSWING_SELECT = "vswing_select"
 CONF_HSWING_SELECT = "hswing_select"
 
-CONFIG_SCHEMA = climate.CLIMATE_SCHEMA.extend(
+# Ab ESPHome 2025.11.0: climate.CLIMATE_SCHEMA entfernt → climate.climate_schema(Class)
+CONFIG_SCHEMA = climate.climate_schema(TclClimate).extend(
     {
-        cv.GenerateID(): cv.declare_id(TclClimate),
         # Vertikales Lamellen-Select (optional, rückwärtskompatibel)
         cv.Optional(CONF_VSWING_SELECT): cv.use_id(select.Select),
-        # Horizontales Lamellen-Select (neu)
+        # Horizontales Lamellen-Select
         cv.Optional(CONF_HSWING_SELECT): cv.use_id(select.Select),
     }
 ).extend(uart.UART_DEVICE_SCHEMA)

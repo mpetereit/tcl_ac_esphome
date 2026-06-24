@@ -148,7 +148,7 @@ void TclClimate::setup() {
   // Vane-Select-Callbacks registrieren
   if (this->vswing_select_ != nullptr) {
     this->vswing_select_->add_on_state_callback([this](uint32_t) {
-      const std::string &value = this->vswing_select_->state;
+      const std::string value = this->vswing_select_->current_option();
       ESP_LOGD(TAG, "Vertical vane select changed: %s", value.c_str());
       this->vane_vertical_pos_ = vswing_str_to_byte(value);
       // Swing-Mode im Climate-State synchronisieren
@@ -171,7 +171,7 @@ void TclClimate::setup() {
 
   if (this->hswing_select_ != nullptr) {
     this->hswing_select_->add_on_state_callback([this](uint32_t) {
-      const std::string &value = this->hswing_select_->state;
+      const std::string value = this->hswing_select_->current_option();
       ESP_LOGD(TAG, "Horizontal vane select changed: %s", value.c_str());
       this->vane_horizontal_pos_ = hswing_str_to_byte(value);
       // Swing-Mode im Climate-State synchronisieren

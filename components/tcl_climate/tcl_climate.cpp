@@ -11,10 +11,11 @@ void TCLClimate::set_current_temperature(float current_temperature) {
   this->current_temperature = current_temperature;
 }
 
-void TCLClimate::set_custom_fan_mode(const std::string &fan_mode) {
-  if (this->custom_fan_mode == fan_mode) return;
+void TCLClimate::set_custom_fan_mode(esphome::StringRef fan_mode) {
+  std::string fm(fan_mode.data(), fan_mode.size());
+  if (this->custom_fan_mode == fm) return;
   this->is_changed = true;
-  this->custom_fan_mode = fan_mode;
+  this->custom_fan_mode = fm;
 }
 
 void TCLClimate::set_mode(esphome::climate::ClimateMode mode) {
@@ -98,7 +99,7 @@ void TCLClimate::build_set_cmd(get_cmd_resp_t *get_cmd_resp) {
     }
     // --- END PATCH ---
 
-    // XOR Prüfsummen-Berechnung (Zwingend exakt einmal am Ende)
+    // XOR Prüfsummen-Berechnung
     uint8_t xor_byte = 0;
     for (size_t i = 0; i < sizeof(m_set_cmd.raw) - 1; i++) {
         xor_byte ^= m_set_cmd.raw[i];
@@ -108,6 +109,7 @@ void TCLClimate::build_set_cmd(get_cmd_resp_t *get_cmd_resp) {
 
 void TCLClimate::setup() {
   set_update_interval(900);
+  this->set_supported_custom_fan_modes({"Turbo", "Mute", "Automatic", "1", "2", "3", "4", "5"});
 }
 
 void TCLClimate::control(const climate::ClimateCall &call) {
@@ -167,6 +169,8 @@ void TCLClimate::control(const climate::ClimateCall &call) {
           case climate::CLIMATE_MODE_AUTO:
             get_cmd_resp.data.mode = 0x05;
             break;
+          case climate::CLIMATE_MODE_OFF:
+            break;
         }
       }
 
@@ -186,26 +190,25 @@ void TCLClimate::control(const climate::ClimateCall &call) {
       ready_to_send_set_cmd_flag = true;
     }
 
-    if (call.get_custom_fan_mode().has_value()) {
-      std::string fan_mode = *call.get_custom_fan_mode();
-
+    esphome::StringRef custom_fan_mode = call.get_custom_fan_mode();
+    if (!custom_fan_mode.empty()) {
       get_cmd_resp_t get_cmd_resp = {0};
       memcpy(get_cmd_resp.raw, m_get_cmd_resp.raw, sizeof(get_cmd_resp.raw));
 
       get_cmd_resp.data.turbo = 0x00;
       get_cmd_resp.data.mute = 0x00;
-      if (fan_mode == esphome::to_string("Turbo")) { 
+      if (custom_fan_mode == "Turbo") { 
         get_cmd_resp.data.fan = 0x03;
         get_cmd_resp.data.turbo = 0x01;
-      } else if (fan_mode == esphome::to_string("Mute")) {
+      } else if (custom_fan_mode == "Mute") {
         get_cmd_resp.data.fan = 0x01;
         get_cmd_resp.data.mute = 0x01;
-      } else if (fan_mode == esphome::to_string("Automatic")) get_cmd_resp.data.fan = 0x00;
-      else if (fan_mode == esphome::to_string("1")) get_cmd_resp.data.fan = 0x01;
-      else if (fan_mode == esphome::to_string("2")) get_cmd_resp.data.fan = 0x04;
-      else if (fan_mode == esphome::to_string("3")) get_cmd_resp.data.fan = 0x02;
-      else if (fan_mode == esphome::to_string("4")) get_cmd_resp.data.fan = 0x05;
-      else if (fan_mode == esphome::to_string("5")) get_cmd_resp.data.fan = 0x03;
+      } else if (custom_fan_mode == "Automatic") get_cmd_resp.data.fan = 0x00;
+      else if (custom_fan_mode == "1") get_cmd_resp.data.fan = 0x01;
+      else if (custom_fan_mode == "2") get_cmd_resp.data.fan = 0x04;
+      else if (custom_fan_mode == "3") get_cmd_resp.data.fan = 0x02;
+      else if (custom_fan_mode == "4") get_cmd_resp.data.fan = 0x05;
+      else if (custom_fan_mode == "5") get_cmd_resp.data.fan = 0x03;
 
       build_set_cmd(&get_cmd_resp);
       ready_to_send_set_cmd_flag = true;
@@ -214,7 +217,6 @@ void TCLClimate::control(const climate::ClimateCall &call) {
 
 climate::ClimateTraits TCLClimate::traits() {
   auto traits = climate::ClimateTraits();
-  traits.set_supports_current_temperature(true);
   traits.set_supported_modes({
     climate::CLIMATE_MODE_OFF,
     climate::CLIMATE_MODE_COOL,
@@ -229,7 +231,6 @@ climate::ClimateTraits TCLClimate::traits() {
     climate::CLIMATE_SWING_HORIZONTAL,
     climate::CLIMATE_SWING_BOTH
   });  
-  traits.set_supported_custom_fan_modes({"Turbo", "Mute", "Automatic", "1", "2", "3", "4", "5"});
   traits.set_visual_min_temperature(16.0);
   traits.set_visual_max_temperature(31.0);
   traits.set_visual_target_temperature_step(1.0);
@@ -321,14 +322,14 @@ void TCLClimate::loop() {
 
           delay(4);
 
-          if (m_get_cmd_resp.data.turbo) this->set_custom_fan_mode(esphome::to_string("Turbo"));
-          else if (m_get_cmd_resp.data.mute) this->set_custom_fan_mode(esphome::to_string("Mute"));
-          else if (m_get_cmd_resp.data.fan == 0x00) this->set_custom_fan_mode(esphome::to_string("Automatic"));
-          else if (m_get_cmd_resp.data.fan == 0x01) this->set_custom_fan_mode(esphome::to_string("1"));
-          else if (m_get_cmd_resp.data.fan == 0x04) this->set_custom_fan_mode(esphome::to_string("2"));
-          else if (m_get_cmd_resp.data.fan == 0x02) this->set_custom_fan_mode(esphome::to_string("3"));
-          else if (m_get_cmd_resp.data.fan == 0x05) this->set_custom_fan_mode(esphome::to_string("4"));
-          else if (m_get_cmd_resp.data.fan == 0x03) this->set_custom_fan_mode(esphome::to_string("5"));
+          if (m_get_cmd_resp.data.turbo) this->set_custom_fan_mode("Turbo");
+          else if (m_get_cmd_resp.data.mute) this->set_custom_fan_mode("Mute");
+          else if (m_get_cmd_resp.data.fan == 0x00) this->set_custom_fan_mode("Automatic");
+          else if (m_get_cmd_resp.data.fan == 0x01) this->set_custom_fan_mode("1");
+          else if (m_get_cmd_resp.data.fan == 0x04) this->set_custom_fan_mode("2");
+          else if (m_get_cmd_resp.data.fan == 0x02) this->set_custom_fan_mode("3");
+          else if (m_get_cmd_resp.data.fan == 0x05) this->set_custom_fan_mode("4");
+          else if (m_get_cmd_resp.data.fan == 0x03) this->set_custom_fan_mode("5");
 
           if (!m_get_cmd_resp.data.vswing && !m_get_cmd_resp.data.hswing)
             this->set_swing_mode(climate::CLIMATE_SWING_OFF);

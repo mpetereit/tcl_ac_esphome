@@ -1,41 +1,39 @@
 """
-tcl_climate/__init__.py
+tcl_climate/__init__.py  –  ESPHome 2026.6.x kompatibel
 
-ESPHome Custom Component für TCL/Kesser/Pioneer/DAIZUKI Klimaanlagen.
-Unterstützt ESPHome 2025.11.0+ / 2026.x (climate.CLIMATE_SCHEMA entfernt,
-jetzt climate.climate_schema(...) verwenden).
+Änderungen gegenüber Original:
+  - climate.CLIMATE_SCHEMA  →  climate.climate_schema(TclClimate)   (ab 2025.11.0)
+  - Klassenname: TclClimate  (nicht TCLClimate – muss exakt mit tcl_climate.h übereinstimmen)
+  - vswing_select + hswing_select als optionale Config-Keys
 """
 
 import esphome.codegen as cg
 import esphome.config_validation as cv
 from esphome.components import climate, uart, select
-from esphome.const import CONF_ID
 
 DEPENDENCIES = ["uart"]
 AUTO_LOAD = ["select"]
 
 tcl_climate_ns = cg.esphome_ns.namespace("tcl_climate")
+
+# Klassenname MUSS exakt dem C++-Klassennamen in tcl_climate.h entsprechen: TclClimate
 TclClimate = tcl_climate_ns.class_(
     "TclClimate", climate.Climate, uart.UARTDevice, cg.Component
 )
 
-# Config-Schlüssel
 CONF_VSWING_SELECT = "vswing_select"
 CONF_HSWING_SELECT = "hswing_select"
 
-# Ab ESPHome 2025.11.0: climate.CLIMATE_SCHEMA entfernt → climate.climate_schema(Class)
 CONFIG_SCHEMA = climate.climate_schema(TclClimate).extend(
     {
-        # Vertikales Lamellen-Select (optional, rückwärtskompatibel)
         cv.Optional(CONF_VSWING_SELECT): cv.use_id(select.Select),
-        # Horizontales Lamellen-Select
         cv.Optional(CONF_HSWING_SELECT): cv.use_id(select.Select),
     }
 ).extend(uart.UART_DEVICE_SCHEMA)
 
 
 async def to_code(config):
-    var = cg.new_Pvariable(config[CONF_ID])
+    var = cg.new_Pvariable(config[cg.CONF_ID])
     await cg.register_component(var, config)
     await uart.register_uart_device(var, config)
     await climate.register_climate(var, config)

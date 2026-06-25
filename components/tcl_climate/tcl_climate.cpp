@@ -10,7 +10,9 @@ static constexpr uint8_t REQ_CMD[] = {0xBB, 0x00, 0x01, 0x04, 0x02, 0x01, 0x00, 
 static constexpr int MAX_LINE_LENGTH = 100;
 static constexpr int UPDATE_INTERVAL_MS = 450;
 
-// ── Unveränderte Original-Methoden ────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// State-Setter (erkennen Änderungen, setzen is_changed für publish_state)
+// ─────────────────────────────────────────────────────────────────────────────
 
 void TCLClimate::set_current_temperature(float current_temperature) {
   if (std::abs(this->current_temperature - current_temperature) < 0.1f) return;
@@ -59,11 +61,17 @@ void TCLClimate::set_swing_mode(climate::ClimateSwingMode swing_mode) {
   this->swing_mode = swing_mode;
 }
 
+void TCLClimate::set_target_temperature(float target_temperature) {
+  if (std::abs(this->target_temperature - target_temperature) < 0.1f) return;
+  ESP_LOGI("TCL", "Target temperature changed to: %.1f°C", target_temperature);
+  this->is_changed = true;
+  this->target_temperature = target_temperature;
+}
+
 void TCLClimate::set_hswing_pos(const std::string &pos) {
   if (this->hswing_pos == pos) return;
   ESP_LOGI("TCL", "Horizontal swing position: %s", pos.c_str());
   this->hswing_pos = pos;
-  // Select-Widget synchronisieren
   if (this->hswing_select_ != nullptr)
     this->hswing_select_->publish_state(pos);
 }
@@ -72,17 +80,13 @@ void TCLClimate::set_vswing_pos(const std::string &pos) {
   if (this->vswing_pos == pos) return;
   ESP_LOGI("TCL", "Vertical swing position: %s", pos.c_str());
   this->vswing_pos = pos;
-  // Select-Widget synchronisieren
   if (this->vswing_select_ != nullptr)
     this->vswing_select_->publish_state(pos);
 }
 
-void TCLClimate::set_target_temperature(float target_temperature) {
-  if (std::abs(this->target_temperature - target_temperature) < 0.1f) return;
-  ESP_LOGI("TCL", "Target temperature changed to: %.1f°C", target_temperature);
-  this->is_changed = true;
-  this->target_temperature = target_temperature;
-}
+// ─────────────────────────────────────────────────────────────────────────────
+// build_set_cmd: Wandelt get_cmd_resp_t (AC-State) in das Set-Kommando um
+// ─────────────────────────────────────────────────────────────────────────────
 
 void TCLClimate::build_set_cmd(get_cmd_resp_t *get_cmd_resp) {
   memcpy(m_set_cmd.raw, set_cmd_base, sizeof(m_set_cmd.raw));
@@ -90,11 +94,19 @@ void TCLClimate::build_set_cmd(get_cmd_resp_t *get_cmd_resp) {
   m_set_cmd.data.power        = get_cmd_resp->data.power;
   m_set_cmd.data.off_timer_en = 0;
   m_set_cmd.data.on_timer_en  = 0;
-  m_set_cmd.data.beep         = 1;
-  m_set_cmd.data.disp         = 1;
-  m_set_cmd.data.eco          = 0;
-  m_set_cmd.data.turbo        = get_cmd_resp->data.turbo;
-  m_set_cmd.data.mute         = get_cmd_resp->data.mute;
+
+  // Neue Features: Beep, Display, Eco aus internen Zuständen
+  m_set_cmd.data.beep      = beep_enabled_    ? 1 : 0;
+  m_set_cmd.data.disp      = display_enabled_ ? 1 : 0;
+  m_set_cmd.data.eco       = eco_enabled_     ? 1 : 0;
+  m_set_cmd.data.turbo     = get_cmd_resp->data.turbo;
+  m_set_cmd.data.mute      = get_cmd_resp->data.mute;
+
+  // 8°-Heizung
+  m_set_cmd.data.heater_8deg = deg8_enabled_ ? 1 : 0;
+
+  // Sleep-Modus (Bits[6:7] in Byte 19)
+  m_set_cmd.data.sleep_mode = sleep_mode_;
 
   static constexpr uint8_t MODE_MAP[] = {
     0x00, // 0x00 - unused
@@ -107,7 +119,12 @@ void TCLClimate::build_set_cmd(get_cmd_resp_t *get_cmd_resp) {
   if (get_cmd_resp->data.mode < sizeof(MODE_MAP))
     m_set_cmd.data.mode = MODE_MAP[get_cmd_resp->data.mode];
 
-  m_set_cmd.data.temp = 15 - get_cmd_resp->data.temp;
+  // Temperatur: ganzzahlig + halber Grad
+  float target = this->target_temperature;
+  uint8_t temp_int  = static_cast<uint8_t>(target);
+  bool    half_deg  = (target - temp_int) >= 0.4f;
+  m_set_cmd.data.temp       = temp_int - 16;
+  m_set_cmd.data.half_degree = half_deg ? 1 : 0;
 
   static constexpr uint8_t FAN_MAP[] = {
     0x00, // auto
@@ -150,8 +167,6 @@ void TCLClimate::build_set_cmd(get_cmd_resp_t *get_cmd_resp) {
     m_set_cmd.data.hswing_mv  = 0;
   }
 
-  m_set_cmd.data.half_degree = 0;
-
   // XOR-Checksumme
   uint8_t xor_byte = 0;
   for (size_t i = 0; i < sizeof(m_set_cmd.raw) - 1; i++)
@@ -159,12 +174,15 @@ void TCLClimate::build_set_cmd(get_cmd_resp_t *get_cmd_resp) {
   m_set_cmd.raw[sizeof(m_set_cmd.raw) - 1] = xor_byte;
 }
 
-// ── setup() ──────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// setup()
+// ─────────────────────────────────────────────────────────────────────────────
+
 void TCLClimate::setup() {
   set_update_interval(UPDATE_INTERVAL_MS);
   this->set_supported_custom_fan_modes({"Turbo", "Mute", "Automatic", "1", "2", "3", "4", "5"});
 
-  // Select-Callbacks registrieren (nur wenn Widgets vorhanden)
+  // ── Select-Callbacks ──────────────────────────────────────────────────────
   if (this->vswing_select_ != nullptr) {
     this->vswing_select_->add_on_state_callback([this](uint32_t) {
       this->control_vertical_swing(this->vswing_select_->current_option());
@@ -175,166 +193,205 @@ void TCLClimate::setup() {
       this->control_horizontal_swing(this->hswing_select_->current_option());
     });
   }
+  if (this->sleep_select_ != nullptr) {
+    this->sleep_select_->add_on_state_callback([this](uint32_t) {
+      this->control_sleep_mode(this->sleep_select_->current_option());
+    });
+  }
+  if (this->preset_select_ != nullptr) {
+    this->preset_select_->add_on_state_callback([this](uint32_t) {
+      const std::string &val = this->preset_select_->current_option();
+      get_cmd_resp_t gcr = {0};
+      memcpy(gcr.raw, m_get_cmd_resp.raw, sizeof(gcr.raw));
+      gcr.data.turbo = 0;
+      gcr.data.mute  = 0;
+      if      (val == "Turbo")     gcr.data.turbo = 1;
+      else if (val == "Mute")      gcr.data.mute  = 1;
+      // "Normal" → turbo=0, mute=0 (bereits gesetzt)
+      ESP_LOGI("TCL", "Preset changed to: %s", val.c_str());
+      build_set_cmd(&gcr);
+      ready_to_send_set_cmd_flag = true;
+    });
+  }
+
+  // ── Switch-Callbacks ──────────────────────────────────────────────────────
+  if (this->beep_switch_ != nullptr) {
+    this->beep_switch_->add_on_state_callback([this](bool state) {
+      beep_enabled_ = state;
+      ESP_LOGI("TCL", "Beep %s", state ? "ON" : "OFF");
+      build_set_cmd(&m_get_cmd_resp);
+      ready_to_send_set_cmd_flag = true;
+    });
+  }
+  if (this->display_switch_ != nullptr) {
+    this->display_switch_->add_on_state_callback([this](bool state) {
+      display_enabled_ = state;
+      ESP_LOGI("TCL", "Display %s", state ? "ON" : "OFF");
+      build_set_cmd(&m_get_cmd_resp);
+      ready_to_send_set_cmd_flag = true;
+    });
+  }
+  if (this->eco_switch_ != nullptr) {
+    this->eco_switch_->add_on_state_callback([this](bool state) {
+      eco_enabled_ = state;
+      ESP_LOGI("TCL", "Eco mode %s", state ? "ON" : "OFF");
+      build_set_cmd(&m_get_cmd_resp);
+      ready_to_send_set_cmd_flag = true;
+    });
+  }
+  if (this->deg8_switch_ != nullptr) {
+    this->deg8_switch_->add_on_state_callback([this](bool state) {
+      deg8_enabled_ = state;
+      ESP_LOGI("TCL", "8° Heater %s", state ? "ON" : "OFF");
+      build_set_cmd(&m_get_cmd_resp);
+      ready_to_send_set_cmd_flag = true;
+    });
+  }
 }
 
-// ── Lamellen-Direktsteuerung (auch via Lambda/YAML aufrufbar) ─────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// Lamellen- und Sleep-Direktsteuerung
+// ─────────────────────────────────────────────────────────────────────────────
+
 void TCLClimate::control_vertical_swing(const std::string &swing_mode) {
-  get_cmd_resp_t get_cmd_resp = {0};
-  memcpy(get_cmd_resp.raw, m_get_cmd_resp.raw, sizeof(get_cmd_resp.raw));
+  get_cmd_resp_t gcr = {0};
+  memcpy(gcr.raw, m_get_cmd_resp.raw, sizeof(gcr.raw));
+  gcr.data.vswing_mv  = 0;
+  gcr.data.vswing_fix = 0;
 
-  get_cmd_resp.data.vswing_mv  = 0;
-  get_cmd_resp.data.vswing_fix = 0;
+  if      (swing_mode == "Move full")   gcr.data.vswing_mv  = 0x01;
+  else if (swing_mode == "Move upper")  gcr.data.vswing_mv  = 0x02;
+  else if (swing_mode == "Move lower")  gcr.data.vswing_mv  = 0x03;
+  else if (swing_mode == "Fix top")     gcr.data.vswing_fix = 0x01;
+  else if (swing_mode == "Fix upper")   gcr.data.vswing_fix = 0x02;
+  else if (swing_mode == "Fix mid")     gcr.data.vswing_fix = 0x03;
+  else if (swing_mode == "Fix lower")   gcr.data.vswing_fix = 0x04;
+  else if (swing_mode == "Fix bottom")  gcr.data.vswing_fix = 0x05;
 
-  if      (swing_mode == "Move full")   get_cmd_resp.data.vswing_mv = 0x01;
-  else if (swing_mode == "Move upper")  get_cmd_resp.data.vswing_mv = 0x02;
-  else if (swing_mode == "Move lower")  get_cmd_resp.data.vswing_mv = 0x03;
-  else if (swing_mode == "Fix top")     get_cmd_resp.data.vswing_fix = 0x01;
-  else if (swing_mode == "Fix upper")   get_cmd_resp.data.vswing_fix = 0x02;
-  else if (swing_mode == "Fix mid")     get_cmd_resp.data.vswing_fix = 0x03;
-  else if (swing_mode == "Fix lower")   get_cmd_resp.data.vswing_fix = 0x04;
-  else if (swing_mode == "Fix bottom")  get_cmd_resp.data.vswing_fix = 0x05;
-  // "Last position" → keine Änderung, nichts setzen
-
-  get_cmd_resp.data.vswing = get_cmd_resp.data.vswing_mv ? 0x01 : 0;
-
-  build_set_cmd(&get_cmd_resp);
+  gcr.data.vswing = gcr.data.vswing_mv ? 0x01 : 0;
+  build_set_cmd(&gcr);
   ready_to_send_set_cmd_flag = true;
 }
 
 void TCLClimate::control_horizontal_swing(const std::string &swing_mode) {
-  get_cmd_resp_t get_cmd_resp = {0};
-  memcpy(get_cmd_resp.raw, m_get_cmd_resp.raw, sizeof(get_cmd_resp.raw));
+  get_cmd_resp_t gcr = {0};
+  memcpy(gcr.raw, m_get_cmd_resp.raw, sizeof(gcr.raw));
+  gcr.data.hswing_mv  = 0;
+  gcr.data.hswing_fix = 0;
 
-  get_cmd_resp.data.hswing_mv  = 0;
-  get_cmd_resp.data.hswing_fix = 0;
+  if      (swing_mode == "Move full")      gcr.data.hswing_mv  = 0x01;
+  else if (swing_mode == "Move left")      gcr.data.hswing_mv  = 0x02;
+  else if (swing_mode == "Move mid")       gcr.data.hswing_mv  = 0x03;
+  else if (swing_mode == "Move right")     gcr.data.hswing_mv  = 0x04;
+  else if (swing_mode == "Fix left")       gcr.data.hswing_fix = 0x01;
+  else if (swing_mode == "Fix mid left")   gcr.data.hswing_fix = 0x02;
+  else if (swing_mode == "Fix mid")        gcr.data.hswing_fix = 0x03;
+  else if (swing_mode == "Fix mid right")  gcr.data.hswing_fix = 0x04;
+  else if (swing_mode == "Fix right")      gcr.data.hswing_fix = 0x05;
 
-  if      (swing_mode == "Move full")     get_cmd_resp.data.hswing_mv = 0x01;
-  else if (swing_mode == "Move left")     get_cmd_resp.data.hswing_mv = 0x02;
-  else if (swing_mode == "Move mid")      get_cmd_resp.data.hswing_mv = 0x03;
-  else if (swing_mode == "Move right")    get_cmd_resp.data.hswing_mv = 0x04;
-  else if (swing_mode == "Fix left")      get_cmd_resp.data.hswing_fix = 0x01;
-  else if (swing_mode == "Fix mid left")  get_cmd_resp.data.hswing_fix = 0x02;
-  else if (swing_mode == "Fix mid")       get_cmd_resp.data.hswing_fix = 0x03;
-  else if (swing_mode == "Fix mid right") get_cmd_resp.data.hswing_fix = 0x04;
-  else if (swing_mode == "Fix right")     get_cmd_resp.data.hswing_fix = 0x05;
-  // "Last position" → keine Änderung
-
-  get_cmd_resp.data.hswing = get_cmd_resp.data.hswing_mv ? 0x01 : 0;
-
-  build_set_cmd(&get_cmd_resp);
+  gcr.data.hswing = gcr.data.hswing_mv ? 0x01 : 0;
+  build_set_cmd(&gcr);
   ready_to_send_set_cmd_flag = true;
 }
 
-// ── control() ────────────────────────────────────────────────────────────────
+void TCLClimate::control_sleep_mode(const std::string &mode) {
+  if      (mode == "Off")         sleep_mode_ = 0x00;
+  else if (mode == "Default")     sleep_mode_ = 0x01;
+  else if (mode == "Elderly")     sleep_mode_ = 0x02;
+  else if (mode == "Young")       sleep_mode_ = 0x03;
+  ESP_LOGI("TCL", "Sleep mode: %s (0x%02X)", mode.c_str(), sleep_mode_);
+  build_set_cmd(&m_get_cmd_resp);
+  ready_to_send_set_cmd_flag = true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// control() – von HA aufgerufen
+// ─────────────────────────────────────────────────────────────────────────────
+
 void TCLClimate::control(const climate::ClimateCall &call) {
-  get_cmd_resp_t get_cmd_resp = {0};
-  memcpy(get_cmd_resp.raw, m_get_cmd_resp.raw, sizeof(get_cmd_resp.raw));
-  bool should_build_cmd = false;
+  get_cmd_resp_t gcr = {0};
+  memcpy(gcr.raw, m_get_cmd_resp.raw, sizeof(gcr.raw));
+  bool should_build = false;
 
   if (call.get_mode().has_value()) {
     climate::ClimateMode climate_mode = *call.get_mode();
-    ESP_LOGI("TCL", "Received mode control command: %d", static_cast<int>(climate_mode));
     if (climate_mode == climate::CLIMATE_MODE_OFF) {
-      get_cmd_resp.data.power = 0x00;
+      gcr.data.power = 0x00;
     } else {
-      get_cmd_resp.data.power = 0x01;
+      gcr.data.power = 0x01;
       switch (climate_mode) {
-        case climate::CLIMATE_MODE_COOL:      get_cmd_resp.data.mode = 0x01; break;
-        case climate::CLIMATE_MODE_DRY:       get_cmd_resp.data.mode = 0x03; break;
-        case climate::CLIMATE_MODE_FAN_ONLY:  get_cmd_resp.data.mode = 0x02; break;
+        case climate::CLIMATE_MODE_COOL:      gcr.data.mode = 0x01; break;
+        case climate::CLIMATE_MODE_DRY:       gcr.data.mode = 0x03; break;
+        case climate::CLIMATE_MODE_FAN_ONLY:  gcr.data.mode = 0x02; break;
         case climate::CLIMATE_MODE_HEAT:
-        case climate::CLIMATE_MODE_HEAT_COOL: get_cmd_resp.data.mode = 0x04; break;
-        case climate::CLIMATE_MODE_AUTO:      get_cmd_resp.data.mode = 0x05; break;
+        case climate::CLIMATE_MODE_HEAT_COOL: gcr.data.mode = 0x04; break;
+        case climate::CLIMATE_MODE_AUTO:      gcr.data.mode = 0x05; break;
         default: break;
       }
     }
-    should_build_cmd = true;
+    should_build = true;
   }
 
   if (call.get_target_temperature().has_value()) {
     float temp = *call.get_target_temperature();
-    ESP_LOGI("TCL", "Received temperature control command: %.1f°C", temp);
-    get_cmd_resp.data.temp = static_cast<uint8_t>(temp) - 16;
-    should_build_cmd = true;
+    // Temperatur wird direkt aus this->target_temperature in build_set_cmd gelesen
+    this->target_temperature = temp;
+    should_build = true;
   }
 
   if (call.get_swing_mode().has_value()) {
-    climate::ClimateSwingMode swing_mode = *call.get_swing_mode();
-    switch (swing_mode) {
+    climate::ClimateSwingMode swing = *call.get_swing_mode();
+    switch (swing) {
       case climate::CLIMATE_SWING_OFF:
-        get_cmd_resp.data.hswing = 0;
-        get_cmd_resp.data.vswing = 0;
-        // Lamellen fixieren auf Mitte
-        get_cmd_resp.data.vswing_fix = 0x03;
-        get_cmd_resp.data.hswing_fix = 0x03;
-        get_cmd_resp.data.vswing_mv  = 0;
-        get_cmd_resp.data.hswing_mv  = 0;
+        gcr.data.hswing = 0; gcr.data.vswing = 0;
+        gcr.data.vswing_fix = 0x03; gcr.data.hswing_fix = 0x03;
+        gcr.data.vswing_mv = 0; gcr.data.hswing_mv = 0;
         break;
       case climate::CLIMATE_SWING_BOTH:
-        get_cmd_resp.data.hswing    = 1;
-        get_cmd_resp.data.vswing    = 1;
-        get_cmd_resp.data.vswing_mv = 0x01;  // Move full
-        get_cmd_resp.data.hswing_mv = 0x01;  // Move full
-        get_cmd_resp.data.vswing_fix = 0;
-        get_cmd_resp.data.hswing_fix = 0;
+        gcr.data.hswing = 1; gcr.data.vswing = 1;
+        gcr.data.vswing_mv = 0x01; gcr.data.hswing_mv = 0x01;
+        gcr.data.vswing_fix = 0; gcr.data.hswing_fix = 0;
         break;
       case climate::CLIMATE_SWING_VERTICAL:
-        get_cmd_resp.data.hswing    = 0;
-        get_cmd_resp.data.vswing    = 1;
-        get_cmd_resp.data.vswing_mv = 0x01;  // Move full
-        get_cmd_resp.data.vswing_fix = 0;
-        get_cmd_resp.data.hswing_mv  = 0;
-        get_cmd_resp.data.hswing_fix = 0x03; // H fix mid
+        gcr.data.vswing = 1; gcr.data.hswing = 0;
+        gcr.data.vswing_mv = 0x01; gcr.data.vswing_fix = 0;
+        gcr.data.hswing_mv = 0; gcr.data.hswing_fix = 0x03;
         break;
       case climate::CLIMATE_SWING_HORIZONTAL:
-        get_cmd_resp.data.hswing    = 1;
-        get_cmd_resp.data.vswing    = 0;
-        get_cmd_resp.data.hswing_mv = 0x01;  // Move full
-        get_cmd_resp.data.hswing_fix = 0;
-        get_cmd_resp.data.vswing_mv  = 0;
-        get_cmd_resp.data.vswing_fix = 0x03; // V fix mid
+        gcr.data.hswing = 1; gcr.data.vswing = 0;
+        gcr.data.hswing_mv = 0x01; gcr.data.hswing_fix = 0;
+        gcr.data.vswing_mv = 0; gcr.data.vswing_fix = 0x03;
         break;
       default: break;
     }
-    should_build_cmd = true;
+    should_build = true;
   }
 
   StringRef custom_fan_mode(call.get_custom_fan_mode());
   if (!custom_fan_mode.empty()) {
     std::string fan_mode(custom_fan_mode.c_str());
-    ESP_LOGI("TCL", "Received fan mode control command: %s", fan_mode.c_str());
-
-    get_cmd_resp.data.turbo = 0x00;
-    get_cmd_resp.data.mute  = 0x00;
-
-    static const std::map<std::string, std::pair<uint8_t, uint8_t>> FAN_MODE_MAP = {
-      {"Turbo",     {0x03, 0x01}},
-      {"Mute",      {0x01, 0x01}},
-      {"Automatic", {0x00, 0x00}},
-      {"1",         {0x01, 0x00}},
-      {"2",         {0x04, 0x00}},
-      {"3",         {0x02, 0x00}},
-      {"4",         {0x05, 0x00}},
-      {"5",         {0x03, 0x00}}
+    gcr.data.turbo = 0; gcr.data.mute = 0;
+    static const std::map<std::string, uint8_t> FAN_MAP = {
+      {"Automatic", 0x00}, {"1", 0x01}, {"2", 0x04},
+      {"3", 0x02}, {"4", 0x05}, {"5", 0x03}
     };
-
-    auto it = FAN_MODE_MAP.find(fan_mode);
-    if (it != FAN_MODE_MAP.end()) {
-      get_cmd_resp.data.fan = it->second.first;
-      if (fan_mode == "Turbo")     get_cmd_resp.data.turbo = 0x01;
-      else if (fan_mode == "Mute") get_cmd_resp.data.mute  = 0x01;
-    }
-    should_build_cmd = true;
+    auto it = FAN_MAP.find(fan_mode);
+    if (it != FAN_MAP.end()) gcr.data.fan = it->second;
+    if (fan_mode == "Turbo") gcr.data.turbo = 0x01;
+    if (fan_mode == "Mute")  gcr.data.mute  = 0x01;
+    should_build = true;
   }
 
-  if (should_build_cmd) {
-    ESP_LOGI("TCL", "Building and sending command to AC unit");
-    build_set_cmd(&get_cmd_resp);
+  if (should_build) {
+    build_set_cmd(&gcr);
     ready_to_send_set_cmd_flag = true;
   }
 }
 
-// ── traits() ─────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// traits()
+// ─────────────────────────────────────────────────────────────────────────────
+
 climate::ClimateTraits TCLClimate::traits() {
   auto traits = climate::ClimateTraits();
   traits.add_feature_flags(climate::CLIMATE_SUPPORTS_CURRENT_TEMPERATURE);
@@ -354,11 +411,14 @@ climate::ClimateTraits TCLClimate::traits() {
   });
   traits.set_visual_min_temperature(16.0);
   traits.set_visual_max_temperature(31.0);
-  traits.set_visual_target_temperature_step(1.0);
+  traits.set_visual_target_temperature_step(0.5);  // ← 0.5°C Schritte aktiviert
   return traits;
 }
 
-// ── update() – periodisch aufgerufen ────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// update() – periodisch
+// ─────────────────────────────────────────────────────────────────────────────
+
 void TCLClimate::update() {
   if (ready_to_send_set_cmd_flag) {
     ready_to_send_set_cmd_flag = false;
@@ -368,7 +428,10 @@ void TCLClimate::update() {
   }
 }
 
-// ── UART-Hilfsfunktionen (unverändert Original) ───────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// UART-Hilfsfunktionen
+// ─────────────────────────────────────────────────────────────────────────────
+
 int TCLClimate::read_data_line(int readch, uint8_t *buffer, int len) {
   static int pos = 0;
   static bool wait_len = false;
@@ -377,9 +440,7 @@ int TCLClimate::read_data_line(int readch, uint8_t *buffer, int len) {
   if (readch < 0) return -1;
 
   if (readch == 0xBB && skipch == 0 && !wait_len) {
-    pos = 0;
-    skipch = 3;
-    wait_len = true;
+    pos = 0; skipch = 3; wait_len = true;
     if (pos < len) buffer[pos++] = static_cast<uint8_t>(readch);
   } else if (skipch == 0 && wait_len) {
     if (pos < len) buffer[pos++] = static_cast<uint8_t>(readch);
@@ -408,7 +469,10 @@ void TCLClimate::print_hex_str(uint8_t *buffer, int len) {
   ESP_LOGD("TCL", "Received: %s", str);
 }
 
-// ── loop() – UART empfangen und State aktualisieren ──────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// loop() – UART empfangen und State auswerten
+// ─────────────────────────────────────────────────────────────────────────────
+
 void TCLClimate::loop() {
   static uint8_t buffer[MAX_LINE_LENGTH];
 
@@ -423,7 +487,7 @@ void TCLClimate::loop() {
         float curr_temp = ((static_cast<uint16_t>(buffer[17] << 8) | buffer[18]) / 374.0f - 32.0f) / 1.8f;
         this->is_changed = false;
 
-        // Modus
+        // ── Betriebsmodus ────────────────────────────────────────────────────
         if (m_get_cmd_resp.data.power == 0x00) {
           this->set_mode(climate::CLIMATE_MODE_OFF);
         } else {
@@ -438,35 +502,50 @@ void TCLClimate::loop() {
           if (it != MODE_MAP.end()) this->set_mode(it->second);
         }
 
-        // Lüfter
-        static const std::map<uint8_t, std::string> FAN_MODE_MAP = {
+        // ── Lüfter / Preset ───────────────────────────────────────────────────
+        static const std::map<uint8_t, std::string> FAN_MAP = {
           {0x00, "Automatic"}, {0x01, "1"}, {0x04, "2"},
           {0x02, "3"},         {0x05, "4"}, {0x03, "5"}
         };
         if (m_get_cmd_resp.data.turbo) {
           this->set_custom_fan_mode(StringRef("Turbo"));
+          if (this->preset_select_ != nullptr) this->preset_select_->publish_state("Turbo");
         } else if (m_get_cmd_resp.data.mute) {
           this->set_custom_fan_mode(StringRef("Mute"));
+          if (this->preset_select_ != nullptr) this->preset_select_->publish_state("Mute");
         } else {
-          auto it = FAN_MODE_MAP.find(m_get_cmd_resp.data.fan);
-          if (it != FAN_MODE_MAP.end()) {
+          auto it = FAN_MAP.find(m_get_cmd_resp.data.fan);
+          if (it != FAN_MAP.end()) {
             StringRef current(this->get_custom_fan_mode());
             if (current.empty() || current != it->second)
               this->set_custom_fan_mode(StringRef(it->second.c_str(), it->second.size()));
           }
+          if (this->preset_select_ != nullptr) this->preset_select_->publish_state("Normal");
         }
 
-        // Schwenkmodus
+        // ── Display-Switch rücksynchronisieren ───────────────────────────────
+        bool disp_on = (m_get_cmd_resp.data.disp == 1);
+        if (this->display_switch_ != nullptr && this->display_switch_->state != disp_on)
+          this->display_switch_->publish_state(disp_on);
+
+        // ── Eco-Switch rücksynchronisieren ───────────────────────────────────
+        bool eco_on = (m_get_cmd_resp.data.eco == 1);
+        if (this->eco_switch_ != nullptr && this->eco_switch_->state != eco_on) {
+          eco_enabled_ = eco_on;
+          this->eco_switch_->publish_state(eco_on);
+        }
+
+        // ── Schwenkmodus ─────────────────────────────────────────────────────
         if      (m_get_cmd_resp.data.hswing && m_get_cmd_resp.data.vswing)
           this->set_swing_mode(climate::CLIMATE_SWING_BOTH);
         else if (!m_get_cmd_resp.data.hswing && !m_get_cmd_resp.data.vswing)
           this->set_swing_mode(climate::CLIMATE_SWING_OFF);
         else if (m_get_cmd_resp.data.vswing)
           this->set_swing_mode(climate::CLIMATE_SWING_VERTICAL);
-        else if (m_get_cmd_resp.data.hswing)
+        else
           this->set_swing_mode(climate::CLIMATE_SWING_HORIZONTAL);
 
-        // Vertikale Lamellenposition → vswing_select aktualisieren
+        // ── Vertikale Lamellenposition ────────────────────────────────────────
         if      (m_get_cmd_resp.data.vswing_mv == 0x01) set_vswing_pos("Move full");
         else if (m_get_cmd_resp.data.vswing_mv == 0x02) set_vswing_pos("Move upper");
         else if (m_get_cmd_resp.data.vswing_mv == 0x03) set_vswing_pos("Move lower");
@@ -477,7 +556,7 @@ void TCLClimate::loop() {
         else if (m_get_cmd_resp.data.vswing_fix == 0x05) set_vswing_pos("Fix bottom");
         else set_vswing_pos("Last position");
 
-        // Horizontale Lamellenposition → hswing_select aktualisieren
+        // ── Horizontale Lamellenposition ──────────────────────────────────────
         if      (m_get_cmd_resp.data.hswing_mv == 0x01) set_hswing_pos("Move full");
         else if (m_get_cmd_resp.data.hswing_mv == 0x02) set_hswing_pos("Move left");
         else if (m_get_cmd_resp.data.hswing_mv == 0x03) set_hswing_pos("Move mid");

@@ -5,6 +5,8 @@
 #include "esphome/components/uart/uart.h"
 #include "esphome/components/climate/climate.h"
 #include "esphome/components/select/select.h"
+#include "esphome/components/switch/switch.h"
+#include "esphome/components/number/number.h"
 
 namespace esphome {
 namespace tcl_climate {
@@ -17,9 +19,17 @@ class TCLClimate : public climate::Climate, public uart::UARTDevice, public Poll
   std::string hswing_pos = "";
   std::string vswing_pos = "";
 
-  // ── Select-Widget-Pointer (optional) ──────────────────────────────────────
+  // ── Select-Widget-Setter ──────────────────────────────────────────────────
   void set_vswing_select(select::Select *sel) { this->vswing_select_ = sel; }
   void set_hswing_select(select::Select *sel) { this->hswing_select_ = sel; }
+  void set_sleep_select(select::Select *sel)  { this->sleep_select_  = sel; }
+  void set_preset_select(select::Select *sel) { this->preset_select_ = sel; }
+
+  // ── Switch-Setter ─────────────────────────────────────────────────────────
+  void set_beep_switch(switch_::Switch *sw)    { this->beep_switch_    = sw; }
+  void set_display_switch(switch_::Switch *sw) { this->display_switch_ = sw; }
+  void set_eco_switch(switch_::Switch *sw)     { this->eco_switch_     = sw; }
+  void set_8deg_switch(switch_::Switch *sw)    { this->deg8_switch_    = sw; }
 
   union get_cmd_resp_t {
     struct {
@@ -145,27 +155,25 @@ class TCLClimate : public climate::Climate, public uart::UARTDevice, public Poll
 
       uint8_t fan : 3;
       uint8_t vswing : 3;
-      uint8_t byte_10_bit_6 : 1;
+      uint8_t heater_8deg : 1;
       uint8_t byte_10_bit_7 : 1;
 
       uint8_t byte_11_bit_0_2 : 3;
       uint8_t hswing : 1;
-      uint8_t byte_11_bit_4_7 : 4;
+      uint8_t byte_11_bit_4 : 1;
+      uint8_t half_degree : 1;
+      uint8_t byte_11_bit_6_7 : 2;
 
       uint8_t byte_12;
       uint8_t byte_13;
-
-      uint8_t byte_14_bit_0_2 : 3;
-      uint8_t byte_14_bit_3 : 1;
-      uint8_t byte_14_bit_4 : 1;
-      uint8_t half_degree : 1;
-      uint8_t byte_14_bit_6_7 : 2;
-
+      uint8_t byte_14;
       uint8_t byte_15;
       uint8_t byte_16;
       uint8_t byte_17;
       uint8_t byte_18;
-      uint8_t byte_19;
+
+      uint8_t byte_19_bit_0_5 : 6;
+      uint8_t sleep_mode : 2;
 
       uint8_t byte_20;
       uint8_t byte_21;
@@ -195,6 +203,13 @@ class TCLClimate : public climate::Climate, public uart::UARTDevice, public Poll
 
   bool ready_to_send_set_cmd_flag = false;
 
+  // Interne Zustände für die neuen Features
+  bool beep_enabled_    = true;
+  bool display_enabled_ = true;
+  bool eco_enabled_     = false;
+  bool deg8_enabled_    = false;
+  uint8_t sleep_mode_   = 0x00;  // 0=off, 1=default, 2=elderly, 3=young
+
   uint8_t set_cmd_base[35] = {
     0xBB, 0x00, 0x01, 0x03, 0x1D,
     0x00, 0x00, 0x64, 0x03, 0xF3,
@@ -214,11 +229,12 @@ class TCLClimate : public climate::Climate, public uart::UARTDevice, public Poll
   void set_swing_mode(climate::ClimateSwingMode swing_mode);
   void set_target_temperature(float target_temperature);
 
-  void set_hswing_pos(const std::string &hswing_pos);
-  void set_vswing_pos(const std::string &vswing_pos);
+  void set_hswing_pos(const std::string &pos);
+  void set_vswing_pos(const std::string &pos);
 
   void control_vertical_swing(const std::string &swing_mode);
   void control_horizontal_swing(const std::string &swing_mode);
+  void control_sleep_mode(const std::string &mode);
 
   void build_set_cmd(get_cmd_resp_t *get_cmd_resp);
 
@@ -234,9 +250,15 @@ class TCLClimate : public climate::Climate, public uart::UARTDevice, public Poll
   bool is_valid_xor(uint8_t *buffer, int len);
   void print_hex_str(uint8_t *buffer, int len);
 
-  // Select-Widgets (optional)
   select::Select *vswing_select_{nullptr};
   select::Select *hswing_select_{nullptr};
+  select::Select *sleep_select_{nullptr};
+  select::Select *preset_select_{nullptr};
+
+  switch_::Switch *beep_switch_{nullptr};
+  switch_::Switch *display_switch_{nullptr};
+  switch_::Switch *eco_switch_{nullptr};
+  switch_::Switch *deg8_switch_{nullptr};
 };
 
 }  // namespace tcl_climate

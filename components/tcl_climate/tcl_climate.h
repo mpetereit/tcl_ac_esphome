@@ -203,7 +203,7 @@ class TCLClimate : public climate::Climate, public uart::UARTDevice, public Poll
   bool ready_to_send_set_cmd_flag = false;
 
   // Interne Zustände für die neuen Features
-  bool beep_enabled_    = true;
+  bool beep_enabled_    = false;  // Beep nur auf expliziten Wunsch
   bool display_enabled_ = true;
   bool eco_enabled_     = false;
   bool deg8_enabled_    = false;

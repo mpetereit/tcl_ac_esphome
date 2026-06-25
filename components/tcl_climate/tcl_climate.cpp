@@ -526,10 +526,12 @@ void TCLClimate::loop() {
         };
         if (m_get_cmd_resp.data.turbo) {
           this->set_custom_fan_mode(StringRef("Turbo"));
-          if (this->preset_select_ != nullptr) this->preset_select_->publish_state("Turbo");
+          if (this->preset_select_ != nullptr && this->preset_select_->current_option() != "Turbo")
+            this->preset_select_->publish_state("Turbo");
         } else if (m_get_cmd_resp.data.mute) {
           this->set_custom_fan_mode(StringRef("Mute"));
-          if (this->preset_select_ != nullptr) this->preset_select_->publish_state("Mute");
+          if (this->preset_select_ != nullptr && this->preset_select_->current_option() != "Mute")
+            this->preset_select_->publish_state("Mute");
         } else {
           auto it = FAN_MAP.find(m_get_cmd_resp.data.fan);
           if (it != FAN_MAP.end()) {
@@ -537,13 +539,16 @@ void TCLClimate::loop() {
             if (current.empty() || current != it->second)
               this->set_custom_fan_mode(StringRef(it->second.c_str(), it->second.size()));
           }
-          if (this->preset_select_ != nullptr) this->preset_select_->publish_state("Normal");
+          if (this->preset_select_ != nullptr && this->preset_select_->current_option() != "Normal")
+            this->preset_select_->publish_state("Normal");
         }
 
         // ── Display-Switch rücksynchronisieren ───────────────────────────────
         bool disp_on = (m_get_cmd_resp.data.disp == 1);
-        if (this->display_switch_ != nullptr && this->display_switch_->state != disp_on)
+        if (this->display_switch_ != nullptr && this->display_switch_->state != disp_on) {
+          display_enabled_ = disp_on;
           this->display_switch_->publish_state(disp_on);
+        }
 
         // ── Eco-Switch rücksynchronisieren ───────────────────────────────────
         bool eco_on = (m_get_cmd_resp.data.eco == 1);

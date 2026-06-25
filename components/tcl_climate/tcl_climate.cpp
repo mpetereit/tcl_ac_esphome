@@ -185,29 +185,42 @@ void TCLClimate::setup() {
   // ── Select-Callbacks ──────────────────────────────────────────────────────
   if (this->vswing_select_ != nullptr) {
     this->vswing_select_->add_on_state_callback([this](uint32_t) {
-      this->control_vertical_swing(this->vswing_select_->current_option());
+      const std::string &val = this->vswing_select_->current_option();
+      if (val == this->vswing_pos) return;  // keine Änderung gegenüber AC-State
+      this->control_vertical_swing(val);
     });
   }
   if (this->hswing_select_ != nullptr) {
     this->hswing_select_->add_on_state_callback([this](uint32_t) {
-      this->control_horizontal_swing(this->hswing_select_->current_option());
+      const std::string &val = this->hswing_select_->current_option();
+      if (val == this->hswing_pos) return;  // keine Änderung gegenüber AC-State
+      this->control_horizontal_swing(val);
     });
   }
   if (this->sleep_select_ != nullptr) {
     this->sleep_select_->add_on_state_callback([this](uint32_t) {
-      this->control_sleep_mode(this->sleep_select_->current_option());
+      const std::string &val = this->sleep_select_->current_option();
+      uint8_t new_mode = 0;
+      if      (val == "Default") new_mode = 0x01;
+      else if (val == "Elderly") new_mode = 0x02;
+      else if (val == "Young")   new_mode = 0x03;
+      if (new_mode == sleep_mode_) return;  // keine Änderung
+      this->control_sleep_mode(val);
     });
   }
   if (this->preset_select_ != nullptr) {
     this->preset_select_->add_on_state_callback([this](uint32_t) {
+      // Guard: nur senden wenn der Wert sich gegenüber dem AC-State wirklich geändert hat
       const std::string &val = this->preset_select_->current_option();
+      bool ac_turbo = (m_get_cmd_resp.data.turbo == 1);
+      bool ac_mute  = (m_get_cmd_resp.data.mute  == 1);
+      bool want_turbo = (val == "Turbo");
+      bool want_mute  = (val == "Mute");
+      if (want_turbo == ac_turbo && want_mute == ac_mute) return;  // keine Änderung
       get_cmd_resp_t gcr = {0};
       memcpy(gcr.raw, m_get_cmd_resp.raw, sizeof(gcr.raw));
-      gcr.data.turbo = 0;
-      gcr.data.mute  = 0;
-      if      (val == "Turbo")     gcr.data.turbo = 1;
-      else if (val == "Mute")      gcr.data.mute  = 1;
-      // "Normal" → turbo=0, mute=0 (bereits gesetzt)
+      gcr.data.turbo = want_turbo ? 1 : 0;
+      gcr.data.mute  = want_mute  ? 1 : 0;
       ESP_LOGI("TCL", "Preset changed to: %s", val.c_str());
       build_set_cmd(&gcr);
       ready_to_send_set_cmd_flag = true;
@@ -217,6 +230,7 @@ void TCLClimate::setup() {
   // ── Switch-Callbacks ──────────────────────────────────────────────────────
   if (this->beep_switch_ != nullptr) {
     this->beep_switch_->add_on_state_callback([this](bool state) {
+      if (state == beep_enabled_) return;
       beep_enabled_ = state;
       ESP_LOGI("TCL", "Beep %s", state ? "ON" : "OFF");
       build_set_cmd(&m_get_cmd_resp);
@@ -225,6 +239,7 @@ void TCLClimate::setup() {
   }
   if (this->display_switch_ != nullptr) {
     this->display_switch_->add_on_state_callback([this](bool state) {
+      if (state == display_enabled_) return;
       display_enabled_ = state;
       ESP_LOGI("TCL", "Display %s", state ? "ON" : "OFF");
       build_set_cmd(&m_get_cmd_resp);
@@ -233,6 +248,7 @@ void TCLClimate::setup() {
   }
   if (this->eco_switch_ != nullptr) {
     this->eco_switch_->add_on_state_callback([this](bool state) {
+      if (state == eco_enabled_) return;
       eco_enabled_ = state;
       ESP_LOGI("TCL", "Eco mode %s", state ? "ON" : "OFF");
       build_set_cmd(&m_get_cmd_resp);
@@ -241,6 +257,7 @@ void TCLClimate::setup() {
   }
   if (this->deg8_switch_ != nullptr) {
     this->deg8_switch_->add_on_state_callback([this](bool state) {
+      if (state == deg8_enabled_) return;
       deg8_enabled_ = state;
       ESP_LOGI("TCL", "8° Heater %s", state ? "ON" : "OFF");
       build_set_cmd(&m_get_cmd_resp);

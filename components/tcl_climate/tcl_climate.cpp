@@ -1,582 +1,501 @@
-/**
- * tcl_climate.cpp
- *
- * ESPHome Custom Component for TCL / Kesser / Pioneer / DAIZUKI AC units
- * Protokoll reverse-engineered by adaasch (https://github.com/adaasch/AC-hack)
- * Original ESPHome-Component: lNikazzzl (https://github.com/lNikazzzl/tcl_ac_esphome)
- *
- * Änderungen gegenüber Original:
- *  - Horizontaler Schwenkmodus (hswing) vollständig implementiert
- *  - Byte 11[4] (Move Horiz. Vane Flag) korrekt gesetzt
- *  - Byte 33 (Horiz. Vane Position) mit allen Protokollwerten belegt
- *  - ESPHome 2026.6.x kompatibel (swing_mode CLIMATE_SWING_BOTH / HORIZONTAL)
- *  - Horizontal-Select parallel zu Vertical-Select als template select
- *
- * Protokoll-Referenz (adaasch):
- *   Byte 11[4]  : Move Horiz. Vane  (1 = schwenken aktiv, 0 = fix)
- *   Byte 33     : Horiz. Vane Position
- *     0x80 = N/A (kein Befehl)
- *     0x81 = Fix left
- *     0x82 = Fix mid-left
- *     0x83 = Fix mid
- *     0x84 = Fix mid-right
- *     0x85 = Fix right
- *     0x88 = Move full range
- *     0x90 = Move left range
- *     0x98 = Move mid range
- *     0xA0 = Move right range
- *
- *   Byte 10[2:4]: Move Vert. Vane   (0b111 = schwenken aktiv, 0b000 = fix)
- *   Byte 32     : Vert. Vane Position
- *     0x00 = N/A
- *     0x01 = Fix top
- *     0x02 = Fix upper
- *     0x03 = Fix mid
- *     0x04 = Fix lower
- *     0x05 = Fix bottom
- *     0x08 = Move full range
- *     0x10 = Move upper range
- *     0x18 = Move lower range
- */
-
-#include "tcl_climate.h"
 #include "esphome/core/log.h"
+#include "esphome/core/helpers.h"
+#include "tcl_climate.h"
+#include <map>
 
 namespace esphome {
 namespace tcl_climate {
 
-static const char *const TAG = "tcl_climate";
+static constexpr uint8_t REQ_CMD[] = {0xBB, 0x00, 0x01, 0x04, 0x02, 0x01, 0x00, 0xBD};
+static constexpr int MAX_LINE_LENGTH = 100;
+static constexpr int UPDATE_INTERVAL_MS = 450;
 
-// ─── Protokoll-Konstanten ────────────────────────────────────────────────────
-static const uint8_t PREAMBLE        = 0xBB;
-static const uint8_t CMD_SET         = 0x03;
-static const uint8_t CMD_GET         = 0x04;
-static const uint8_t PAYLOAD_LEN_SET = 0x1D;  // 29 Byte Payload
-static const uint8_t PAYLOAD_LEN_GET = 0x02;
+// ── Unveränderte Original-Methoden ────────────────────────────────────────────
 
-// Vertikale Lamellenposition (Byte 32 im Gesamtpaket = Payload-Byte 27)
-static const uint8_t VVANE_NA         = 0x00;
-static const uint8_t VVANE_FIX_TOP    = 0x01;
-static const uint8_t VVANE_FIX_UPPER  = 0x02;
-static const uint8_t VVANE_FIX_MID    = 0x03;
-static const uint8_t VVANE_FIX_LOWER  = 0x04;
-static const uint8_t VVANE_FIX_BOTTOM = 0x05;
-static const uint8_t VVANE_MOVE_FULL  = 0x08;
-static const uint8_t VVANE_MOVE_UPPER = 0x10;
-static const uint8_t VVANE_MOVE_LOWER = 0x18;
-
-// Horizontale Lamellenposition (Byte 33 im Gesamtpaket = Payload-Byte 28)
-static const uint8_t HVANE_NA         = 0x80;
-static const uint8_t HVANE_FIX_LEFT   = 0x81;
-static const uint8_t HVANE_FIX_MLEFT  = 0x82;
-static const uint8_t HVANE_FIX_MID    = 0x83;
-static const uint8_t HVANE_FIX_MRIGHT = 0x84;
-static const uint8_t HVANE_FIX_RIGHT  = 0x85;
-static const uint8_t HVANE_MOVE_FULL  = 0x88;
-static const uint8_t HVANE_MOVE_LEFT  = 0x90;
-static const uint8_t HVANE_MOVE_MID   = 0x98;
-static const uint8_t HVANE_MOVE_RIGHT = 0xA0;
-
-// ─── CRC8 Polynom = 1 (XOR-Summe aller Bytes) ───────────────────────────────
-static uint8_t calc_checksum(const uint8_t *data, size_t len) {
-  uint8_t sum = 0;
-  for (size_t i = 0; i < len; i++) sum ^= data[i];
-  return sum;
+void TCLClimate::set_current_temperature(float current_temperature) {
+  if (std::abs(this->current_temperature - current_temperature) < 0.1f) return;
+  ESP_LOGD("TCL", "Current temperature updated to: %.1f°C", current_temperature);
+  this->is_changed = true;
+  this->current_temperature = current_temperature;
 }
 
-// ─── Hilfsfunktionen für Vane-String → Byte-Mapping ─────────────────────────
-
-static uint8_t vswing_str_to_byte(const std::string &s) {
-  if (s == "Fix top")      return VVANE_FIX_TOP;
-  if (s == "Fix upper")    return VVANE_FIX_UPPER;
-  if (s == "Fix mid")      return VVANE_FIX_MID;
-  if (s == "Fix lower")    return VVANE_FIX_LOWER;
-  if (s == "Fix bottom")   return VVANE_FIX_BOTTOM;
-  if (s == "Move full")    return VVANE_MOVE_FULL;
-  if (s == "Move upper")   return VVANE_MOVE_UPPER;
-  if (s == "Move lower")   return VVANE_MOVE_LOWER;
-  return VVANE_NA;  // "Last position" oder unbekannt
+void TCLClimate::set_custom_fan_mode(StringRef fan_mode) {
+  StringRef current(this->get_custom_fan_mode());
+  if (!current.empty() && fan_mode == current.c_str()) return;
+  ESP_LOGI("TCL", "Fan mode changed to: %s", fan_mode.c_str());
+  this->is_changed = true;
+  this->set_custom_fan_mode_(fan_mode.c_str());
 }
 
-static uint8_t hswing_str_to_byte(const std::string &s) {
-  if (s == "Fix left")      return HVANE_FIX_LEFT;
-  if (s == "Fix mid-left")  return HVANE_FIX_MLEFT;
-  if (s == "Fix mid")       return HVANE_FIX_MID;
-  if (s == "Fix mid-right") return HVANE_FIX_MRIGHT;
-  if (s == "Fix right")     return HVANE_FIX_RIGHT;
-  if (s == "Move full")     return HVANE_MOVE_FULL;
-  if (s == "Move left")     return HVANE_MOVE_LEFT;
-  if (s == "Move mid")      return HVANE_MOVE_MID;
-  if (s == "Move right")    return HVANE_MOVE_RIGHT;
-  return HVANE_NA;  // "Last position" oder unbekannt
-}
-
-static std::string vbyte_to_str(uint8_t b) {
-  switch (b) {
-    case VVANE_FIX_TOP:    return "Fix top";
-    case VVANE_FIX_UPPER:  return "Fix upper";
-    case VVANE_FIX_MID:    return "Fix mid";
-    case VVANE_FIX_LOWER:  return "Fix lower";
-    case VVANE_FIX_BOTTOM: return "Fix bottom";
-    case VVANE_MOVE_FULL:  return "Move full";
-    case VVANE_MOVE_UPPER: return "Move upper";
-    case VVANE_MOVE_LOWER: return "Move lower";
-    default:               return "Last position";
+void TCLClimate::set_mode(climate::ClimateMode mode) {
+  if (this->mode == mode) return;
+  const char* mode_str = "";
+  switch (mode) {
+    case climate::CLIMATE_MODE_OFF:      mode_str = "OFF";      break;
+    case climate::CLIMATE_MODE_COOL:     mode_str = "COOL";     break;
+    case climate::CLIMATE_MODE_HEAT:     mode_str = "HEAT";     break;
+    case climate::CLIMATE_MODE_FAN_ONLY: mode_str = "FAN ONLY"; break;
+    case climate::CLIMATE_MODE_DRY:      mode_str = "DRY";      break;
+    case climate::CLIMATE_MODE_AUTO:     mode_str = "AUTO";     break;
+    default:                             mode_str = "UNKNOWN";  break;
   }
+  ESP_LOGI("TCL", "Climate mode changed to: %s", mode_str);
+  this->is_changed = true;
+  this->mode = mode;
 }
 
-static std::string hbyte_to_str(uint8_t b) {
-  switch (b) {
-    case HVANE_FIX_LEFT:   return "Fix left";
-    case HVANE_FIX_MLEFT:  return "Fix mid-left";
-    case HVANE_FIX_MID:    return "Fix mid";
-    case HVANE_FIX_MRIGHT: return "Fix mid-right";
-    case HVANE_FIX_RIGHT:  return "Fix right";
-    case HVANE_MOVE_FULL:  return "Move full";
-    case HVANE_MOVE_LEFT:  return "Move left";
-    case HVANE_MOVE_MID:   return "Move mid";
-    case HVANE_MOVE_RIGHT: return "Move right";
-    default:               return "Last position";
+void TCLClimate::set_swing_mode(climate::ClimateSwingMode swing_mode) {
+  if (this->swing_mode == swing_mode) return;
+  const char* swing_str = "";
+  switch (swing_mode) {
+    case climate::CLIMATE_SWING_OFF:        swing_str = "OFF";        break;
+    case climate::CLIMATE_SWING_BOTH:       swing_str = "BOTH";       break;
+    case climate::CLIMATE_SWING_VERTICAL:   swing_str = "VERTICAL";   break;
+    case climate::CLIMATE_SWING_HORIZONTAL: swing_str = "HORIZONTAL"; break;
+    default:                                swing_str = "UNKNOWN";    break;
   }
+  ESP_LOGI("TCL", "Swing mode changed to: %s", swing_str);
+  this->is_changed = true;
+  this->swing_mode = swing_mode;
 }
 
-// ─── setup() ─────────────────────────────────────────────────────────────────
-void TclClimate::setup() {
-  // Traits werden nur über traits() definiert – setup() braucht keine Kopie.
-  // Callbacks für die Select-Widgets:
+void TCLClimate::set_hswing_pos(const std::string &pos) {
+  if (this->hswing_pos == pos) return;
+  ESP_LOGI("TCL", "Horizontal swing position: %s", pos.c_str());
+  this->hswing_pos = pos;
+  // Select-Widget synchronisieren
+  if (this->hswing_select_ != nullptr)
+    this->hswing_select_->publish_state(pos);
+}
 
-  // Vane-Select-Callbacks registrieren
+void TCLClimate::set_vswing_pos(const std::string &pos) {
+  if (this->vswing_pos == pos) return;
+  ESP_LOGI("TCL", "Vertical swing position: %s", pos.c_str());
+  this->vswing_pos = pos;
+  // Select-Widget synchronisieren
+  if (this->vswing_select_ != nullptr)
+    this->vswing_select_->publish_state(pos);
+}
+
+void TCLClimate::set_target_temperature(float target_temperature) {
+  if (std::abs(this->target_temperature - target_temperature) < 0.1f) return;
+  ESP_LOGI("TCL", "Target temperature changed to: %.1f°C", target_temperature);
+  this->is_changed = true;
+  this->target_temperature = target_temperature;
+}
+
+void TCLClimate::build_set_cmd(get_cmd_resp_t *get_cmd_resp) {
+  memcpy(m_set_cmd.raw, set_cmd_base, sizeof(m_set_cmd.raw));
+
+  m_set_cmd.data.power        = get_cmd_resp->data.power;
+  m_set_cmd.data.off_timer_en = 0;
+  m_set_cmd.data.on_timer_en  = 0;
+  m_set_cmd.data.beep         = 1;
+  m_set_cmd.data.disp         = 1;
+  m_set_cmd.data.eco          = 0;
+  m_set_cmd.data.turbo        = get_cmd_resp->data.turbo;
+  m_set_cmd.data.mute         = get_cmd_resp->data.mute;
+
+  static constexpr uint8_t MODE_MAP[] = {
+    0x00, // 0x00 - unused
+    0x03, // 0x01 -> cool
+    0x02, // 0x02 -> fan only
+    0x07, // 0x03 -> dry
+    0x01, // 0x04 -> heat
+    0x08  // 0x05 -> auto
+  };
+  if (get_cmd_resp->data.mode < sizeof(MODE_MAP))
+    m_set_cmd.data.mode = MODE_MAP[get_cmd_resp->data.mode];
+
+  m_set_cmd.data.temp = 15 - get_cmd_resp->data.temp;
+
+  static constexpr uint8_t FAN_MAP[] = {
+    0x00, // auto
+    0x02, // 1
+    0x03, // 3
+    0x05, // 5
+    0x06, // 2
+    0x07  // 4
+  };
+  if (get_cmd_resp->data.fan < sizeof(FAN_MAP))
+    m_set_cmd.data.fan = FAN_MAP[get_cmd_resp->data.fan];
+
+  // Vertikaler Schwenk
+  if (get_cmd_resp->data.vswing_mv) {
+    m_set_cmd.data.vswing     = 0x07;
+    m_set_cmd.data.vswing_fix = 0;
+    m_set_cmd.data.vswing_mv  = get_cmd_resp->data.vswing_mv;
+  } else if (get_cmd_resp->data.vswing_fix) {
+    m_set_cmd.data.vswing     = 0;
+    m_set_cmd.data.vswing_fix = get_cmd_resp->data.vswing_fix;
+    m_set_cmd.data.vswing_mv  = 0;
+  } else {
+    m_set_cmd.data.vswing     = get_cmd_resp->data.vswing;
+    m_set_cmd.data.vswing_fix = 0;
+    m_set_cmd.data.vswing_mv  = 0;
+  }
+
+  // Horizontaler Schwenk
+  if (get_cmd_resp->data.hswing_mv) {
+    m_set_cmd.data.hswing     = 0x01;
+    m_set_cmd.data.hswing_fix = 0;
+    m_set_cmd.data.hswing_mv  = get_cmd_resp->data.hswing_mv;
+  } else if (get_cmd_resp->data.hswing_fix) {
+    m_set_cmd.data.hswing     = 0;
+    m_set_cmd.data.hswing_fix = get_cmd_resp->data.hswing_fix;
+    m_set_cmd.data.hswing_mv  = 0;
+  } else {
+    m_set_cmd.data.hswing     = get_cmd_resp->data.hswing;
+    m_set_cmd.data.hswing_fix = 0;
+    m_set_cmd.data.hswing_mv  = 0;
+  }
+
+  m_set_cmd.data.half_degree = 0;
+
+  // XOR-Checksumme
+  uint8_t xor_byte = 0;
+  for (size_t i = 0; i < sizeof(m_set_cmd.raw) - 1; i++)
+    xor_byte ^= m_set_cmd.raw[i];
+  m_set_cmd.raw[sizeof(m_set_cmd.raw) - 1] = xor_byte;
+}
+
+// ── setup() ──────────────────────────────────────────────────────────────────
+void TCLClimate::setup() {
+  set_update_interval(UPDATE_INTERVAL_MS);
+  this->set_supported_custom_fan_modes({"Turbo", "Mute", "Automatic", "1", "2", "3", "4", "5"});
+
+  // Select-Callbacks registrieren (nur wenn Widgets vorhanden)
   if (this->vswing_select_ != nullptr) {
     this->vswing_select_->add_on_state_callback([this](uint32_t) {
-      const std::string value = this->vswing_select_->current_option();
-      ESP_LOGD(TAG, "Vertical vane select changed: %s", value.c_str());
-      this->vane_vertical_pos_ = vswing_str_to_byte(value);
-      // Swing-Mode im Climate-State synchronisieren
-      bool v_swinging = (this->vane_vertical_pos_ == VVANE_MOVE_FULL ||
-                         this->vane_vertical_pos_ == VVANE_MOVE_UPPER ||
-                         this->vane_vertical_pos_ == VVANE_MOVE_LOWER);
-      bool h_swinging = (this->swing_mode == climate::CLIMATE_SWING_HORIZONTAL ||
-                         this->swing_mode == climate::CLIMATE_SWING_BOTH);
-      if (v_swinging && h_swinging)
-        this->swing_mode = climate::CLIMATE_SWING_BOTH;
-      else if (v_swinging)
-        this->swing_mode = climate::CLIMATE_SWING_VERTICAL;
-      else if (h_swinging)
-        this->swing_mode = climate::CLIMATE_SWING_HORIZONTAL;
-      else
-        this->swing_mode = climate::CLIMATE_SWING_OFF;
-      this->send_set_command_();
+      this->control_vertical_swing(this->vswing_select_->current_option());
     });
   }
-
   if (this->hswing_select_ != nullptr) {
     this->hswing_select_->add_on_state_callback([this](uint32_t) {
-      const std::string value = this->hswing_select_->current_option();
-      ESP_LOGD(TAG, "Horizontal vane select changed: %s", value.c_str());
-      this->vane_horizontal_pos_ = hswing_str_to_byte(value);
-      // Swing-Mode im Climate-State synchronisieren
-      bool h_swinging = (this->vane_horizontal_pos_ == HVANE_MOVE_FULL ||
-                         this->vane_horizontal_pos_ == HVANE_MOVE_LEFT ||
-                         this->vane_horizontal_pos_ == HVANE_MOVE_MID ||
-                         this->vane_horizontal_pos_ == HVANE_MOVE_RIGHT);
-      bool v_swinging = (this->swing_mode == climate::CLIMATE_SWING_VERTICAL ||
-                         this->swing_mode == climate::CLIMATE_SWING_BOTH);
-      if (v_swinging && h_swinging)
-        this->swing_mode = climate::CLIMATE_SWING_BOTH;
-      else if (h_swinging)
-        this->swing_mode = climate::CLIMATE_SWING_HORIZONTAL;
-      else if (v_swinging)
-        this->swing_mode = climate::CLIMATE_SWING_VERTICAL;
-      else
-        this->swing_mode = climate::CLIMATE_SWING_OFF;
-      this->send_set_command_();
+      this->control_horizontal_swing(this->hswing_select_->current_option());
     });
   }
-
-  // Initialen Status abrufen
-  this->send_get_command_();
 }
 
-// ─── loop() ──────────────────────────────────────────────────────────────────
-void TclClimate::loop() {
-  // Alle verfügbaren UART-Bytes lesen
-  while (this->available()) {
-    uint8_t c;
-    this->read_byte(&c);
-    this->rx_buffer_.push_back(c);
-  }
+// ── Lamellen-Direktsteuerung (auch via Lambda/YAML aufrufbar) ─────────────────
+void TCLClimate::control_vertical_swing(const std::string &swing_mode) {
+  get_cmd_resp_t get_cmd_resp = {0};
+  memcpy(get_cmd_resp.raw, m_get_cmd_resp.raw, sizeof(get_cmd_resp.raw));
 
-  // Auf vollständige Antwortpakete prüfen
-  this->parse_rx_buffer_();
+  get_cmd_resp.data.vswing_mv  = 0;
+  get_cmd_resp.data.vswing_fix = 0;
 
-  // Periodischer Status-Poll
-  const uint32_t now = millis();
-  if (now - this->last_poll_ms_ >= POLL_INTERVAL_MS) {
-    this->last_poll_ms_ = now;
-    this->send_get_command_();
-  }
+  if      (swing_mode == "Move full")   get_cmd_resp.data.vswing_mv = 0x01;
+  else if (swing_mode == "Move upper")  get_cmd_resp.data.vswing_mv = 0x02;
+  else if (swing_mode == "Move lower")  get_cmd_resp.data.vswing_mv = 0x03;
+  else if (swing_mode == "Fix top")     get_cmd_resp.data.vswing_fix = 0x01;
+  else if (swing_mode == "Fix upper")   get_cmd_resp.data.vswing_fix = 0x02;
+  else if (swing_mode == "Fix mid")     get_cmd_resp.data.vswing_fix = 0x03;
+  else if (swing_mode == "Fix lower")   get_cmd_resp.data.vswing_fix = 0x04;
+  else if (swing_mode == "Fix bottom")  get_cmd_resp.data.vswing_fix = 0x05;
+  // "Last position" → keine Änderung, nichts setzen
+
+  get_cmd_resp.data.vswing = get_cmd_resp.data.vswing_mv ? 0x01 : 0;
+
+  build_set_cmd(&get_cmd_resp);
+  ready_to_send_set_cmd_flag = true;
 }
 
-// ─── control() – von ESPHome/HA aufgerufen ───────────────────────────────────
-void TclClimate::control(const climate::ClimateCall &call) {
-  if (call.get_mode().has_value())
-    this->mode = *call.get_mode();
+void TCLClimate::control_horizontal_swing(const std::string &swing_mode) {
+  get_cmd_resp_t get_cmd_resp = {0};
+  memcpy(get_cmd_resp.raw, m_get_cmd_resp.raw, sizeof(get_cmd_resp.raw));
 
-  if (call.get_target_temperature().has_value())
-    this->target_temperature = *call.get_target_temperature();
+  get_cmd_resp.data.hswing_mv  = 0;
+  get_cmd_resp.data.hswing_fix = 0;
 
-  if (call.get_fan_mode().has_value())
-    this->fan_mode = *call.get_fan_mode();
+  if      (swing_mode == "Move full")     get_cmd_resp.data.hswing_mv = 0x01;
+  else if (swing_mode == "Move left")     get_cmd_resp.data.hswing_mv = 0x02;
+  else if (swing_mode == "Move mid")      get_cmd_resp.data.hswing_mv = 0x03;
+  else if (swing_mode == "Move right")    get_cmd_resp.data.hswing_mv = 0x04;
+  else if (swing_mode == "Fix left")      get_cmd_resp.data.hswing_fix = 0x01;
+  else if (swing_mode == "Fix mid left")  get_cmd_resp.data.hswing_fix = 0x02;
+  else if (swing_mode == "Fix mid")       get_cmd_resp.data.hswing_fix = 0x03;
+  else if (swing_mode == "Fix mid right") get_cmd_resp.data.hswing_fix = 0x04;
+  else if (swing_mode == "Fix right")     get_cmd_resp.data.hswing_fix = 0x05;
+  // "Last position" → keine Änderung
 
-  // Swing-Modus: ESPHome CLIMATE_SWING_* → interne Vane-Bytes
-  if (call.get_swing_mode().has_value()) {
-    this->swing_mode = *call.get_swing_mode();
+  get_cmd_resp.data.hswing = get_cmd_resp.data.hswing_mv ? 0x01 : 0;
 
-    switch (this->swing_mode) {
-      case climate::CLIMATE_SWING_OFF:
-        // Vertikale Lamelle auf Mitte fixieren, horizontal auf Mitte fixieren
-        this->vane_vertical_pos_   = VVANE_FIX_MID;
-        this->vane_horizontal_pos_ = HVANE_FIX_MID;
-        break;
-
-      case climate::CLIMATE_SWING_VERTICAL:
-        this->vane_vertical_pos_   = VVANE_MOVE_FULL;
-        // Horizontal unverändert lassen – aber sicherstellen dass kein Move aktiv
-        if (this->vane_horizontal_pos_ == HVANE_MOVE_FULL ||
-            this->vane_horizontal_pos_ == HVANE_MOVE_LEFT ||
-            this->vane_horizontal_pos_ == HVANE_MOVE_MID ||
-            this->vane_horizontal_pos_ == HVANE_MOVE_RIGHT) {
-          this->vane_horizontal_pos_ = HVANE_FIX_MID;
-        }
-        break;
-
-      case climate::CLIMATE_SWING_HORIZONTAL:
-        this->vane_horizontal_pos_ = HVANE_MOVE_FULL;
-        // Vertikal fixieren falls aktuell schwenkend
-        if (this->vane_vertical_pos_ == VVANE_MOVE_FULL ||
-            this->vane_vertical_pos_ == VVANE_MOVE_UPPER ||
-            this->vane_vertical_pos_ == VVANE_MOVE_LOWER) {
-          this->vane_vertical_pos_ = VVANE_FIX_MID;
-        }
-        break;
-
-      case climate::CLIMATE_SWING_BOTH:
-        this->vane_vertical_pos_   = VVANE_MOVE_FULL;
-        this->vane_horizontal_pos_ = HVANE_MOVE_FULL;
-        break;
-
-      default:
-        break;
-    }
-
-    // Select-Widgets synchronisieren
-    if (this->vswing_select_ != nullptr)
-      this->vswing_select_->publish_state(vbyte_to_str(this->vane_vertical_pos_));
-    if (this->hswing_select_ != nullptr)
-      this->hswing_select_->publish_state(hbyte_to_str(this->vane_horizontal_pos_));
-  }
-
-  this->send_set_command_();
-  this->publish_state();
+  build_set_cmd(&get_cmd_resp);
+  ready_to_send_set_cmd_flag = true;
 }
 
-// ─── traits() ────────────────────────────────────────────────────────────────
-climate::ClimateTraits TclClimate::traits() {
-  auto t = climate::ClimateTraits();
-  // Ab ESPHome 2026.5: add_feature_flags statt set_supports_current_temperature
-  t.add_feature_flags(climate::CLIMATE_SUPPORTS_CURRENT_TEMPERATURE);
-  t.set_visual_min_temperature(16.0f);
-  t.set_visual_max_temperature(31.0f);
-  t.set_visual_temperature_step(0.5f);
-  t.set_supported_modes({
-    climate::CLIMATE_MODE_OFF,
-    climate::CLIMATE_MODE_HEAT,
-    climate::CLIMATE_MODE_COOL,
-    climate::CLIMATE_MODE_DRY,
-    climate::CLIMATE_MODE_FAN_ONLY,
-    climate::CLIMATE_MODE_HEAT_COOL,
-  });
-  t.set_supported_fan_modes({
-    climate::CLIMATE_FAN_AUTO,
-    climate::CLIMATE_FAN_LOW,
-    climate::CLIMATE_FAN_MEDIUM,
-    climate::CLIMATE_FAN_HIGH,
-  });
-  t.set_supported_swing_modes({
-    climate::CLIMATE_SWING_OFF,
-    climate::CLIMATE_SWING_VERTICAL,
-    climate::CLIMATE_SWING_HORIZONTAL,
-    climate::CLIMATE_SWING_BOTH,
-  });
-  return t;
-}
+// ── control() ────────────────────────────────────────────────────────────────
+void TCLClimate::control(const climate::ClimateCall &call) {
+  get_cmd_resp_t get_cmd_resp = {0};
+  memcpy(get_cmd_resp.raw, m_get_cmd_resp.raw, sizeof(get_cmd_resp.raw));
+  bool should_build_cmd = false;
 
-// ─── Sendefunktionen ─────────────────────────────────────────────────────────
-
-void TclClimate::send_get_command_() {
-  // BB 00 01 04 02 01 00 <CRC>
-  uint8_t pkt[8];
-  pkt[0] = PREAMBLE;
-  pkt[1] = 0x00;  // response flag (wir sind Modul → 0)
-  pkt[2] = 0x01;  // request flag
-  pkt[3] = CMD_GET;
-  pkt[4] = PAYLOAD_LEN_GET;
-  pkt[5] = 0x01;
-  pkt[6] = 0x00;
-  pkt[7] = calc_checksum(pkt, 7);
-  this->write_array(pkt, 8);
-  ESP_LOGV(TAG, "Sent GET command");
-}
-
-void TclClimate::send_set_command_() {
-  // Gesamtpaket: 5 Header + 29 Payload + 1 CRC = 35 Byte
-  uint8_t pkt[35] = {0};
-
-  pkt[0] = PREAMBLE;
-  pkt[1] = 0x00;  // module → 0
-  pkt[2] = 0x01;  // request
-  pkt[3] = CMD_SET;
-  pkt[4] = PAYLOAD_LEN_SET;
-
-  // ── Payload-Byte 0 (pkt[5]): Eco/Display/Buzzer/Power ──
-  // Power: Bits 4:7  → 0x4 = On, 0x0 = Off
-  uint8_t power_bits = (this->mode != climate::CLIMATE_MODE_OFF) ? 0x04 : 0x00;
-  pkt[5] = 0x00;  // eco=0, display=0, buzzer=0, unknown=0
-  pkt[6] = 0x00;
-
-  // ── Payload-Byte 2 (pkt[7]): Power[4:7] | ExtendedMode[0:3] | Mode[4:7] ──
-  //   Bit-Layout laut Protokoll:
-  //     [7:4] = Power  (0x4 = on, 0x0 = off)
-  //     [3:0] = Extended Mode (0x0=normal, 0x1=health, 0x4=turbo, 0x8=low noise)
-  // pkt[7] = (power_bits << 4) | 0x00  (normal mode)
-  pkt[7] = (power_bits << 4);
-
-  // ── pkt[8]: ExtendedMode[4:7] | Mode[0:3] ──
-  uint8_t ac_mode = 0x03;  // default: cooling
-  switch (this->mode) {
-    case climate::CLIMATE_MODE_HEAT:       ac_mode = 0x01; break;
-    case climate::CLIMATE_MODE_DRY:        ac_mode = 0x02; break;
-    case climate::CLIMATE_MODE_COOL:       ac_mode = 0x03; break;
-    case climate::CLIMATE_MODE_FAN_ONLY:   ac_mode = 0x07; break;
-    case climate::CLIMATE_MODE_HEAT_COOL:  ac_mode = 0x08; break;
-    default:                               ac_mode = 0x03; break;
-  }
-  pkt[8] = (0x01 << 4) | ac_mode;  // ExtendedMode nibble = 0x1 (bleibt immer 1 laut Traces)
-
-  // ── pkt[9]: Unknown[0:3]=0x5 | Temperature[4:7] ──
-  //   Temperature: 0xF + 16 - T  (T in [16..31])
-  float t = this->target_temperature;
-  if (t < 16.0f) t = 16.0f;
-  if (t > 31.0f) t = 31.0f;
-  uint8_t temp_int  = (uint8_t)t;
-  bool    temp_half = (t - temp_int) >= 0.5f;
-  uint8_t temp_nibble = (uint8_t)(0x0F + 16 - temp_int) & 0x0F;
-  pkt[9] = (temp_nibble << 4) | 0x05;
-
-  // ── pkt[10]: 8°Heater[0] | Unknown[1] | MoveVertVane[2:4] | FanSpeed[5:7] ──
-  uint8_t fan_bits = 0x00;  // auto
-  switch (this->fan_mode.value_or(climate::CLIMATE_FAN_AUTO)) {
-    case climate::CLIMATE_FAN_LOW:    fan_bits = 0x02; break;  // speed 1
-    case climate::CLIMATE_FAN_MEDIUM: fan_bits = 0x03; break;  // speed 3
-    case climate::CLIMATE_FAN_HIGH:   fan_bits = 0x07; break;  // speed 5
-    default:                          fan_bits = 0x00; break;  // auto
-  }
-
-  // MoveVertVane: wenn vertikale Schwenkposition ein "Move" ist → 0b111, sonst 0b000
-  bool v_move = (this->vane_vertical_pos_ == VVANE_MOVE_FULL  ||
-                 this->vane_vertical_pos_ == VVANE_MOVE_UPPER ||
-                 this->vane_vertical_pos_ == VVANE_MOVE_LOWER);
-  uint8_t vvane_move_bits = v_move ? 0x07 : 0x00;
-
-  pkt[10] = (fan_bits << 5) | (vvane_move_bits << 2) | 0x00;  // 8°heater=0, unknown=0
-
-  // ── pkt[11]: Unknown[0:3]=0 | MoveHorizVane[4] | Unknown[5] | TempDeci[6] | Unknown[7] ──
-  // MoveHorizVane Bit[4]: 1 wenn horizontales Schwenken aktiv
-  bool h_move = (this->vane_horizontal_pos_ == HVANE_MOVE_FULL  ||
-                 this->vane_horizontal_pos_ == HVANE_MOVE_LEFT  ||
-                 this->vane_horizontal_pos_ == HVANE_MOVE_MID   ||
-                 this->vane_horizontal_pos_ == HVANE_MOVE_RIGHT);
-  uint8_t hvane_move_bit = h_move ? 0x10 : 0x00;
-  uint8_t temp_deci_bit  = temp_half ? 0x40 : 0x00;
-  pkt[11] = hvane_move_bit | temp_deci_bit;
-
-  // pkt[12..26]: all 0 (unknown / sleep mode etc.)
-  // pkt[27]: Vert. Vane Position (Byte 32 im Protokoll = pkt-Offset 27+5=32 ✓)
-  pkt[27] = this->vane_vertical_pos_;
-
-  // pkt[28]: Horiz. Vane Position (Byte 33 im Protokoll = pkt-Offset 28+5=33 ✓)
-  pkt[28] = this->vane_horizontal_pos_;
-
-  // pkt[29..33]: all 0
-
-  // CRC über alle Bytes außer dem letzten
-  pkt[34] = calc_checksum(pkt, 34);
-
-  this->write_array(pkt, 35);
-
-  ESP_LOGD(TAG, "Sent SET: mode=%d fan=%d temp=%.1f vvane=0x%02X hvane=0x%02X swing=%d",
-           (int)this->mode,
-           (int)this->fan_mode.value_or(climate::CLIMATE_FAN_AUTO),
-           (double)this->target_temperature,
-           this->vane_vertical_pos_,
-           this->vane_horizontal_pos_,
-           (int)this->swing_mode);
-}
-
-// ─── RX-Puffer auswerten ─────────────────────────────────────────────────────
-void TclClimate::parse_rx_buffer_() {
-  // Minimale Paketgröße: 5 Header + 2 Payload (GET-Request) + 1 CRC = 8
-  // Status-Antwort: 5 + 55 + 1 = 61 Byte
-  while (this->rx_buffer_.size() >= 8) {
-    // Preamble suchen
-    if (this->rx_buffer_[0] != PREAMBLE) {
-      this->rx_buffer_.erase(this->rx_buffer_.begin());
-      continue;
-    }
-
-    // Mindest-Header gelesen?
-    if (this->rx_buffer_.size() < 5) break;
-
-    uint8_t payload_len = this->rx_buffer_[4];
-    size_t  total_len   = 5 + payload_len + 1;  // Header + Payload + CRC
-
-    if (this->rx_buffer_.size() < total_len) break;  // noch nicht vollständig
-
-    // CRC prüfen
-    uint8_t expected_crc = calc_checksum(this->rx_buffer_.data(), total_len - 1);
-    uint8_t received_crc = this->rx_buffer_[total_len - 1];
-
-    if (expected_crc != received_crc) {
-      ESP_LOGW(TAG, "CRC error: expected 0x%02X got 0x%02X – discarding byte", expected_crc, received_crc);
-      this->rx_buffer_.erase(this->rx_buffer_.begin());
-      continue;
-    }
-
-    // Paket ist valide – auswerten
-    uint8_t response_flag = this->rx_buffer_[1];
-    uint8_t cmd           = this->rx_buffer_[3];
-
-    if (response_flag == 0x01) {  // Antwort von der AC
-      if ((cmd == CMD_SET || cmd == CMD_GET) && payload_len >= 0x37) {
-        this->handle_status_response_(this->rx_buffer_.data(), total_len);
+  if (call.get_mode().has_value()) {
+    climate::ClimateMode climate_mode = *call.get_mode();
+    ESP_LOGI("TCL", "Received mode control command: %d", static_cast<int>(climate_mode));
+    if (climate_mode == climate::CLIMATE_MODE_OFF) {
+      get_cmd_resp.data.power = 0x00;
+    } else {
+      get_cmd_resp.data.power = 0x01;
+      switch (climate_mode) {
+        case climate::CLIMATE_MODE_COOL:      get_cmd_resp.data.mode = 0x01; break;
+        case climate::CLIMATE_MODE_DRY:       get_cmd_resp.data.mode = 0x03; break;
+        case climate::CLIMATE_MODE_FAN_ONLY:  get_cmd_resp.data.mode = 0x02; break;
+        case climate::CLIMATE_MODE_HEAT:
+        case climate::CLIMATE_MODE_HEAT_COOL: get_cmd_resp.data.mode = 0x04; break;
+        case climate::CLIMATE_MODE_AUTO:      get_cmd_resp.data.mode = 0x05; break;
+        default: break;
       }
     }
+    should_build_cmd = true;
+  }
 
-    // Verarbeitetes Paket entfernen
-    this->rx_buffer_.erase(this->rx_buffer_.begin(),
-                            this->rx_buffer_.begin() + total_len);
+  if (call.get_target_temperature().has_value()) {
+    float temp = *call.get_target_temperature();
+    ESP_LOGI("TCL", "Received temperature control command: %.1f°C", temp);
+    get_cmd_resp.data.temp = static_cast<uint8_t>(temp) - 16;
+    should_build_cmd = true;
+  }
+
+  if (call.get_swing_mode().has_value()) {
+    climate::ClimateSwingMode swing_mode = *call.get_swing_mode();
+    switch (swing_mode) {
+      case climate::CLIMATE_SWING_OFF:
+        get_cmd_resp.data.hswing = 0;
+        get_cmd_resp.data.vswing = 0;
+        // Lamellen fixieren auf Mitte
+        get_cmd_resp.data.vswing_fix = 0x03;
+        get_cmd_resp.data.hswing_fix = 0x03;
+        get_cmd_resp.data.vswing_mv  = 0;
+        get_cmd_resp.data.hswing_mv  = 0;
+        break;
+      case climate::CLIMATE_SWING_BOTH:
+        get_cmd_resp.data.hswing    = 1;
+        get_cmd_resp.data.vswing    = 1;
+        get_cmd_resp.data.vswing_mv = 0x01;  // Move full
+        get_cmd_resp.data.hswing_mv = 0x01;  // Move full
+        get_cmd_resp.data.vswing_fix = 0;
+        get_cmd_resp.data.hswing_fix = 0;
+        break;
+      case climate::CLIMATE_SWING_VERTICAL:
+        get_cmd_resp.data.hswing    = 0;
+        get_cmd_resp.data.vswing    = 1;
+        get_cmd_resp.data.vswing_mv = 0x01;  // Move full
+        get_cmd_resp.data.vswing_fix = 0;
+        get_cmd_resp.data.hswing_mv  = 0;
+        get_cmd_resp.data.hswing_fix = 0x03; // H fix mid
+        break;
+      case climate::CLIMATE_SWING_HORIZONTAL:
+        get_cmd_resp.data.hswing    = 1;
+        get_cmd_resp.data.vswing    = 0;
+        get_cmd_resp.data.hswing_mv = 0x01;  // Move full
+        get_cmd_resp.data.hswing_fix = 0;
+        get_cmd_resp.data.vswing_mv  = 0;
+        get_cmd_resp.data.vswing_fix = 0x03; // V fix mid
+        break;
+      default: break;
+    }
+    should_build_cmd = true;
+  }
+
+  StringRef custom_fan_mode(call.get_custom_fan_mode());
+  if (!custom_fan_mode.empty()) {
+    std::string fan_mode(custom_fan_mode.c_str());
+    ESP_LOGI("TCL", "Received fan mode control command: %s", fan_mode.c_str());
+
+    get_cmd_resp.data.turbo = 0x00;
+    get_cmd_resp.data.mute  = 0x00;
+
+    static const std::map<std::string, std::pair<uint8_t, uint8_t>> FAN_MODE_MAP = {
+      {"Turbo",     {0x03, 0x01}},
+      {"Mute",      {0x01, 0x01}},
+      {"Automatic", {0x00, 0x00}},
+      {"1",         {0x01, 0x00}},
+      {"2",         {0x04, 0x00}},
+      {"3",         {0x02, 0x00}},
+      {"4",         {0x05, 0x00}},
+      {"5",         {0x03, 0x00}}
+    };
+
+    auto it = FAN_MODE_MAP.find(fan_mode);
+    if (it != FAN_MODE_MAP.end()) {
+      get_cmd_resp.data.fan = it->second.first;
+      if (fan_mode == "Turbo")     get_cmd_resp.data.turbo = 0x01;
+      else if (fan_mode == "Mute") get_cmd_resp.data.mute  = 0x01;
+    }
+    should_build_cmd = true;
+  }
+
+  if (should_build_cmd) {
+    ESP_LOGI("TCL", "Building and sending command to AC unit");
+    build_set_cmd(&get_cmd_resp);
+    ready_to_send_set_cmd_flag = true;
   }
 }
 
-// ─── Status-Antwort auswerten ─────────────────────────────────────────────────
-// Antwortformat (Protokoll-Byte-Indizes, 0-basiert):
-//   [0]  = 0xBB
-//   [1]  = 0x01 (AC→Modul)
-//   [2]  = 0x00
-//   [3]  = CMD (0x03 oder 0x04)
-//   [4]  = 0x37 (55 Byte Payload)
-//   [5]  = Payload-Start
-//   --- Payload ---
-//   [5+2] = pkt[7]:  Status[0:3] | Mode[4:7]
-//   [5+3] = pkt[8]:  FanSpeed[0:3] | SetTemperature[4:7]
-//   [5+4] = pkt[9]:  Temperature (deci)
-//   [5+5] = pkt[10]: Vanes[0:3]  (bit1=hSwing, bit2=vSwing)
-void TclClimate::handle_status_response_(const uint8_t *data, size_t len) {
-  if (len < 12) return;
+// ── traits() ─────────────────────────────────────────────────────────────────
+climate::ClimateTraits TCLClimate::traits() {
+  auto traits = climate::ClimateTraits();
+  traits.add_feature_flags(climate::CLIMATE_SUPPORTS_CURRENT_TEMPERATURE);
+  traits.set_supported_modes({
+    climate::CLIMATE_MODE_OFF,
+    climate::CLIMATE_MODE_COOL,
+    climate::CLIMATE_MODE_HEAT,
+    climate::CLIMATE_MODE_FAN_ONLY,
+    climate::CLIMATE_MODE_DRY,
+    climate::CLIMATE_MODE_AUTO
+  });
+  traits.set_supported_swing_modes({
+    climate::CLIMATE_SWING_OFF,
+    climate::CLIMATE_SWING_BOTH,
+    climate::CLIMATE_SWING_VERTICAL,
+    climate::CLIMATE_SWING_HORIZONTAL
+  });
+  traits.set_visual_min_temperature(16.0);
+  traits.set_visual_max_temperature(31.0);
+  traits.set_visual_target_temperature_step(1.0);
+  return traits;
+}
 
-  // Byte-Offset ab Paket-Start (data[0]=BB)
-  // pkt[7]  = data[7]
-  uint8_t b7  = data[7];
-  uint8_t b8  = data[8];
-  uint8_t b9  = data[9];
-  uint8_t b10 = data[10];
-
-  // ── Status / Power ──
-  uint8_t status = (b7 >> 0) & 0x0F;  // Bits [3:0]
-  // 0x2=Off, 0x3=On, 0x7=Eco, 0xB=Turbo
-  bool power_on = (status == 0x03 || status == 0x07 || status == 0x0B);
-
-  // ── Mode ──
-  uint8_t mode_nibble = (b7 >> 4) & 0x0F;  // Bits [7:4]
-  // 0x1=cooling, 0x2=venting, 0x3=dehumid, 0x4=heating, 0x5=auto
-  if (!power_on) {
-    this->mode = climate::CLIMATE_MODE_OFF;
+// ── update() – periodisch aufgerufen ────────────────────────────────────────
+void TCLClimate::update() {
+  if (ready_to_send_set_cmd_flag) {
+    ready_to_send_set_cmd_flag = false;
+    write_array(m_set_cmd.raw, sizeof(m_set_cmd.raw));
   } else {
-    switch (mode_nibble) {
-      case 0x04: this->mode = climate::CLIMATE_MODE_HEAT;       break;
-      case 0x02: this->mode = climate::CLIMATE_MODE_FAN_ONLY;   break;
-      case 0x03: this->mode = climate::CLIMATE_MODE_DRY;        break;
-      case 0x01: this->mode = climate::CLIMATE_MODE_COOL;       break;
-      case 0x05: this->mode = climate::CLIMATE_MODE_HEAT_COOL;  break;
-      default:   this->mode = climate::CLIMATE_MODE_COOL;       break;
+    write_array(REQ_CMD, sizeof(REQ_CMD));
+  }
+}
+
+// ── UART-Hilfsfunktionen (unverändert Original) ───────────────────────────────
+int TCLClimate::read_data_line(int readch, uint8_t *buffer, int len) {
+  static int pos = 0;
+  static bool wait_len = false;
+  static int skipch = 0;
+
+  if (readch < 0) return -1;
+
+  if (readch == 0xBB && skipch == 0 && !wait_len) {
+    pos = 0;
+    skipch = 3;
+    wait_len = true;
+    if (pos < len) buffer[pos++] = static_cast<uint8_t>(readch);
+  } else if (skipch == 0 && wait_len) {
+    if (pos < len) buffer[pos++] = static_cast<uint8_t>(readch);
+    skipch = readch + 1;
+    wait_len = false;
+  } else if (skipch > 0) {
+    if (pos < len) buffer[pos++] = static_cast<uint8_t>(readch);
+    if (--skipch == 0 && !wait_len) return pos;
+  }
+  return -1;
+}
+
+bool TCLClimate::is_valid_xor(uint8_t *buffer, int len) {
+  if (len < 1) return false;
+  uint8_t xor_byte = 0;
+  for (int i = 0; i < len - 1; i++) xor_byte ^= buffer[i];
+  return xor_byte == buffer[len - 1];
+}
+
+void TCLClimate::print_hex_str(uint8_t *buffer, int len) {
+  if (len <= 0) return;
+  char str[MAX_LINE_LENGTH * 3] = {0};
+  char *pstr = str;
+  for (int i = 0; i < len && (pstr - str) < static_cast<int>(sizeof(str)) - 3; i++)
+    pstr += sprintf(pstr, "%02X ", buffer[i]);
+  ESP_LOGD("TCL", "Received: %s", str);
+}
+
+// ── loop() – UART empfangen und State aktualisieren ──────────────────────────
+void TCLClimate::loop() {
+  static uint8_t buffer[MAX_LINE_LENGTH];
+
+  while (available()) {
+    int len = read_data_line(read(), buffer, MAX_LINE_LENGTH);
+    if (len == sizeof(m_get_cmd_resp) && buffer[3] == 0x04) {
+      memcpy(m_get_cmd_resp.raw, buffer, len);
+
+      if (is_valid_xor(buffer, len)) {
+        print_hex_str(buffer, len);
+
+        float curr_temp = ((static_cast<uint16_t>(buffer[17] << 8) | buffer[18]) / 374.0f - 32.0f) / 1.8f;
+        this->is_changed = false;
+
+        // Modus
+        if (m_get_cmd_resp.data.power == 0x00) {
+          this->set_mode(climate::CLIMATE_MODE_OFF);
+        } else {
+          static const std::map<uint8_t, climate::ClimateMode> MODE_MAP = {
+            {0x01, climate::CLIMATE_MODE_COOL},
+            {0x03, climate::CLIMATE_MODE_DRY},
+            {0x02, climate::CLIMATE_MODE_FAN_ONLY},
+            {0x04, climate::CLIMATE_MODE_HEAT},
+            {0x05, climate::CLIMATE_MODE_AUTO}
+          };
+          auto it = MODE_MAP.find(m_get_cmd_resp.data.mode);
+          if (it != MODE_MAP.end()) this->set_mode(it->second);
+        }
+
+        // Lüfter
+        static const std::map<uint8_t, std::string> FAN_MODE_MAP = {
+          {0x00, "Automatic"}, {0x01, "1"}, {0x04, "2"},
+          {0x02, "3"},         {0x05, "4"}, {0x03, "5"}
+        };
+        if (m_get_cmd_resp.data.turbo) {
+          this->set_custom_fan_mode(StringRef("Turbo"));
+        } else if (m_get_cmd_resp.data.mute) {
+          this->set_custom_fan_mode(StringRef("Mute"));
+        } else {
+          auto it = FAN_MODE_MAP.find(m_get_cmd_resp.data.fan);
+          if (it != FAN_MODE_MAP.end()) {
+            StringRef current(this->get_custom_fan_mode());
+            if (current.empty() || current != it->second)
+              this->set_custom_fan_mode(StringRef(it->second.c_str(), it->second.size()));
+          }
+        }
+
+        // Schwenkmodus
+        if      (m_get_cmd_resp.data.hswing && m_get_cmd_resp.data.vswing)
+          this->set_swing_mode(climate::CLIMATE_SWING_BOTH);
+        else if (!m_get_cmd_resp.data.hswing && !m_get_cmd_resp.data.vswing)
+          this->set_swing_mode(climate::CLIMATE_SWING_OFF);
+        else if (m_get_cmd_resp.data.vswing)
+          this->set_swing_mode(climate::CLIMATE_SWING_VERTICAL);
+        else if (m_get_cmd_resp.data.hswing)
+          this->set_swing_mode(climate::CLIMATE_SWING_HORIZONTAL);
+
+        // Vertikale Lamellenposition → vswing_select aktualisieren
+        if      (m_get_cmd_resp.data.vswing_mv == 0x01) set_vswing_pos("Move full");
+        else if (m_get_cmd_resp.data.vswing_mv == 0x02) set_vswing_pos("Move upper");
+        else if (m_get_cmd_resp.data.vswing_mv == 0x03) set_vswing_pos("Move lower");
+        else if (m_get_cmd_resp.data.vswing_fix == 0x01) set_vswing_pos("Fix top");
+        else if (m_get_cmd_resp.data.vswing_fix == 0x02) set_vswing_pos("Fix upper");
+        else if (m_get_cmd_resp.data.vswing_fix == 0x03) set_vswing_pos("Fix mid");
+        else if (m_get_cmd_resp.data.vswing_fix == 0x04) set_vswing_pos("Fix lower");
+        else if (m_get_cmd_resp.data.vswing_fix == 0x05) set_vswing_pos("Fix bottom");
+        else set_vswing_pos("Last position");
+
+        // Horizontale Lamellenposition → hswing_select aktualisieren
+        if      (m_get_cmd_resp.data.hswing_mv == 0x01) set_hswing_pos("Move full");
+        else if (m_get_cmd_resp.data.hswing_mv == 0x02) set_hswing_pos("Move left");
+        else if (m_get_cmd_resp.data.hswing_mv == 0x03) set_hswing_pos("Move mid");
+        else if (m_get_cmd_resp.data.hswing_mv == 0x04) set_hswing_pos("Move right");
+        else if (m_get_cmd_resp.data.hswing_fix == 0x01) set_hswing_pos("Fix left");
+        else if (m_get_cmd_resp.data.hswing_fix == 0x02) set_hswing_pos("Fix mid left");
+        else if (m_get_cmd_resp.data.hswing_fix == 0x03) set_hswing_pos("Fix mid");
+        else if (m_get_cmd_resp.data.hswing_fix == 0x04) set_hswing_pos("Fix mid right");
+        else if (m_get_cmd_resp.data.hswing_fix == 0x05) set_hswing_pos("Fix right");
+        else set_hswing_pos("Last position");
+
+        this->set_target_temperature(static_cast<float>(m_get_cmd_resp.data.temp + 16));
+        this->set_current_temperature(curr_temp);
+
+        if (this->is_changed) this->publish_state();
+      }
     }
   }
-
-  // ── Fan Speed ──
-  uint8_t fan_nibble = (b8 >> 0) & 0x0F;
-  // 0x8=Auto, 0x9=1, 0xC=2, 0xA=3, 0xD=4, 0xB=5
-  switch (fan_nibble) {
-    case 0x08: this->fan_mode = climate::CLIMATE_FAN_AUTO;   break;
-    case 0x09: this->fan_mode = climate::CLIMATE_FAN_LOW;    break;
-    case 0x0C: this->fan_mode = climate::CLIMATE_FAN_LOW;    break;
-    case 0x0A: this->fan_mode = climate::CLIMATE_FAN_MEDIUM; break;
-    case 0x0D: this->fan_mode = climate::CLIMATE_FAN_HIGH;   break;
-    case 0x0B: this->fan_mode = climate::CLIMATE_FAN_HIGH;   break;
-    default:   this->fan_mode = climate::CLIMATE_FAN_AUTO;   break;
-  }
-
-  // ── Zieltemperatur ──
-  uint8_t temp_nibble = (b8 >> 4) & 0x0F;  // T = X + 16
-  float   set_temp    = (float)(temp_nibble + 16);
-  uint8_t deci_flag   = b9;
-  if (deci_flag == 0x02) set_temp += 0.5f;
-  this->target_temperature = set_temp;
-
-  // ── Schwenk-Flags aus Byte 10 ──
-  // bit1 (0x02) = horizontal swinging
-  // bit2 (0x04) = vertical swinging
-  bool v_swinging_reported = (b10 & 0x04) != 0;
-  bool h_swinging_reported = (b10 & 0x02) != 0;
-
-  if (v_swinging_reported && h_swinging_reported)
-    this->swing_mode = climate::CLIMATE_SWING_BOTH;
-  else if (v_swinging_reported)
-    this->swing_mode = climate::CLIMATE_SWING_VERTICAL;
-  else if (h_swinging_reported)
-    this->swing_mode = climate::CLIMATE_SWING_HORIZONTAL;
-  else
-    this->swing_mode = climate::CLIMATE_SWING_OFF;
-
-  // ── Select-Widgets aus vollen Vane-Positions-Bytes aktualisieren (falls vorhanden) ──
-  // Diese Bytes liegen in der längeren Antwort (Payload ≥ 0x37 = 55 Byte)
-  // Byte 32 im Gesamtpaket (0-basiert) = data[32]
-  // Byte 33 im Gesamtpaket             = data[33]
-  if (len > 34) {
-    uint8_t vvane_byte = data[32];
-    uint8_t hvane_byte = data[33];
-
-    if (vvane_byte != 0x00) {
-      this->vane_vertical_pos_ = vvane_byte;
-      if (this->vswing_select_ != nullptr)
-        this->vswing_select_->publish_state(vbyte_to_str(vvane_byte));
-    }
-
-    if (hvane_byte != 0x80) {
-      this->vane_horizontal_pos_ = hvane_byte;
-      if (this->hswing_select_ != nullptr)
-        this->hswing_select_->publish_state(hbyte_to_str(hvane_byte));
-    }
-  }
-
-  ESP_LOGD(TAG, "Status: mode=%d fan=%d temp=%.1f swing=%d vvane=0x%02X hvane=0x%02X",
-           (int)this->mode,
-           (int)this->fan_mode.value_or(climate::CLIMATE_FAN_AUTO),
-           (double)this->target_temperature,
-           (int)this->swing_mode,
-           this->vane_vertical_pos_,
-           this->vane_horizontal_pos_);
-
-  this->publish_state();
 }
 
 }  // namespace tcl_climate

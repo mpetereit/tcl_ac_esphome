@@ -1,16 +1,16 @@
 esphome:
-  name: tcl-ac
-
-esp8266:
-  board: esp07
+  name: esphome-web-c3f4ed
 
 external_components:
   - source:
       type: git
-      url: https://github.com/lNikazzzl/tcl_ac_esphome
+      url: https://github.com/mpetereit/tcl_ac_esphome
+      ref: master
+    refresh: 0s
     components: [tcl_climate]
-#  or local
-#  - source: components
+
+esp8266:
+  board: esp07
 
 wifi:
   ssid: !secret wifi_ssid
@@ -19,30 +19,27 @@ wifi:
 api:
 
 ota:
-  password: 123
-
-uart:
-  id: uart_bus
-  tx_pin: 1
-  rx_pin: 3
-  baud_rate: 9600
-  parity: EVEN
+  platform: esphome
 
 logger:
-  level: VERBOSE
+  level: INFO
   baud_rate: 0
 
-climate:
-  - platform: tcl_climate
-    id: tcl_custom_climate
-    uart_id: uart_bus
-    name: "HAVC TCL"
+uart:
+  id: ac_bus
+  tx_pin: GPIO15
+  rx_pin: GPIO13
+  baud_rate: 9600
+  parity: EVEN
+  rx_buffer_size: 256
 
 select:
   - platform: template
-    name: Vertical swing
-    id: vswing
+    name: "Vertikale Lamelle"
+    id: vswing_select
     entity_category: config
+    optimistic: true
+    restore_value: true
     options:
       - "Last position"
       - "Fix top"
@@ -53,15 +50,14 @@ select:
       - "Move full"
       - "Move upper"
       - "Move lower"
-    set_action:
-      then:
-        lambda: |-
-          id(tcl_custom_climate).control_vertical_swing(x);
+    initial_option: "Fix mid"
 
   - platform: template
-    name: Horizontal swing
-    id: hswing
+    name: "Horizontale Lamelle"
+    id: hswing_select
     entity_category: config
+    optimistic: true
+    restore_value: true
     options:
       - "Last position"
       - "Fix left"
@@ -73,7 +69,12 @@ select:
       - "Move left"
       - "Move mid"
       - "Move right"
-    set_action:
-      then:
-        lambda: |-
-          id(tcl_custom_climate).control_horizontal_swing(x);
+    initial_option: "Fix mid"
+
+climate:
+  - platform: tcl_climate
+    id: my_custom_climate
+    name: "Klimasteuerung"
+    uart_id: ac_bus
+    vswing_select: vswing_select
+    hswing_select: hswing_select

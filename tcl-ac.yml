@@ -33,6 +33,39 @@ uart:
   parity: EVEN
   rx_buffer_size: 256
 
+# ── Schalter ─────────────────────────────────────────────────────────────────
+
+switch:
+  - platform: template
+    name: "Piep-Ton"
+    id: beep_switch
+    entity_category: config
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+
+  - platform: template
+    name: "Display"
+    id: display_switch
+    entity_category: config
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+
+  - platform: template
+    name: "Eco-Modus"
+    id: eco_switch
+    entity_category: config
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+
+  - platform: template
+    name: "8°-Heizung"
+    id: deg8_switch
+    entity_category: config
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+
+# ── Selects ───────────────────────────────────────────────────────────────────
+
 select:
   - platform: template
     name: "Vertikale Lamelle"
@@ -40,6 +73,7 @@ select:
     entity_category: config
     optimistic: true
     restore_value: true
+    initial_option: "Fix mid"
     options:
       - "Last position"
       - "Fix top"
@@ -50,7 +84,6 @@ select:
       - "Move full"
       - "Move upper"
       - "Move lower"
-    initial_option: "Fix mid"
 
   - platform: template
     name: "Horizontale Lamelle"
@@ -58,6 +91,7 @@ select:
     entity_category: config
     optimistic: true
     restore_value: true
+    initial_option: "Fix mid"
     options:
       - "Last position"
       - "Fix left"
@@ -69,12 +103,47 @@ select:
       - "Move left"
       - "Move mid"
       - "Move right"
-    initial_option: "Fix mid"
+
+  - platform: template
+    name: "Schlafmodus"
+    id: sleep_select
+    entity_category: config
+    optimistic: true
+    restore_value: true
+    initial_option: "Off"
+    options:
+      - "Off"
+      - "Default"
+      - "Elderly"
+      - "Young"
+
+  - platform: template
+    name: "Preset"
+    id: preset_select
+    entity_category: config
+    optimistic: true
+    restore_value: true
+    initial_option: "Normal"
+    options:
+      - "Normal"
+      - "Turbo"
+      - "Mute"
+
+# ── Klimaanlage ───────────────────────────────────────────────────────────────
 
 climate:
   - platform: tcl_climate
     id: my_custom_climate
     name: "Klimasteuerung"
     uart_id: ac_bus
+    # Lamellen
     vswing_select: vswing_select
     hswing_select: hswing_select
+    # Schlaf & Preset
+    sleep_select: sleep_select
+    preset_select: preset_select
+    # Schalter
+    beep_switch: beep_switch
+    display_switch: display_switch
+    eco_switch: eco_switch
+    8deg_switch: deg8_switch

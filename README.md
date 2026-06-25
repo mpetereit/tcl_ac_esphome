@@ -86,6 +86,8 @@ Nach dem Flashen hängt das Modul weiterhin im Flash-Modus fest. Es muss in den 
 The [original WiFi-Module](https://github.com/user-attachments/assets/f1888a35-ba68-4869-9790-71ff8c572931) is an ESP8266 and it's original Tuya firmware can be replaced with Tasmota or esphome. It's case is easy to open and [solderpads for serial connection](https://github.com/user-attachments/assets/4515421f-4346-4248-aba7-d4db3886ac40) are available.
 The wired UART for the connection to the AC's mainboard uses tx_pin: GPIO15 / rx_pin: GPIO13
 
-### Donation: 
-- kaspi kz (outside Russia) 4400430344051161
-- sber (Russia) 2202205034977568
+### Funktionen
+
+<img width="417" height="891" alt="image" src="https://github.com/user-attachments/assets/3e97dc1c-7dfc-4f84-90e9-c05885fa5587" />
+<img width="702" height="710" alt="image" src="https://github.com/user-attachments/assets/d4305dab-dafb-4ca7-a4dc-a777ba9c328c" />
+

@@ -352,9 +352,8 @@ void TCLClimate::control(const climate::ClimateCall &call) {
   if (call.get_target_temperature().has_value()) {
     float temp = *call.get_target_temperature();
     this->target_temperature = temp;
-    // Gesendeten Wert sofort in m_get_cmd_resp spiegeln, damit der
-    // Debounce-Mechanismus in loop() den richtigen Wert sichert.
-    uint8_t temp_nibble = static_cast<uint8_t>(temp) - 16;
+    // In get_cmd_resp ist temp invertiert: temp = 15 - (T - 16) = 31 - T
+    uint8_t temp_nibble = static_cast<uint8_t>(31 - static_cast<uint8_t>(temp));
     m_get_cmd_resp.data.temp = temp_nibble & 0x0F;
     temp_cmd_sent_ms_ = millis();
     should_build = true;
@@ -612,9 +611,10 @@ void TCLClimate::loop() {
 
         this->set_current_temperature(curr_temp);
 
-        // Zieltemperatur aus AC übernehmen (temp-Nibble ist im Debounce-Fall bereits
-        // auf unseren gesendeten Wert gesetzt, also immer korrekt lesbar)
-        this->set_target_temperature(static_cast<float>(m_get_cmd_resp.data.temp + 16));
+        // Zieltemperatur aus AC übernehmen.
+        // In get_cmd_resp ist temp invertiert kodiert: temp = 15 - (T - 16)
+        // Also: T = 15 - temp + 16 = 31 - temp
+        this->set_target_temperature(static_cast<float>(31 - m_get_cmd_resp.data.temp));
 
         if (this->is_changed) this->publish_state();
       }

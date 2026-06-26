@@ -209,6 +209,11 @@ class TCLClimate : public climate::Climate, public uart::UARTDevice, public Poll
   bool deg8_enabled_    = false;
   uint8_t sleep_mode_   = 0x00;  // 0=off, 1=default, 2=elderly, 3=young
 
+  // Temperatur-Debounce: nach einem gesendeten Befehl ignoriert loop()
+  // AC-Poll-Werte fuer die Temperatur fuer TEMP_DEBOUNCE_MS Millisekunden.
+  uint32_t temp_cmd_sent_ms_ = 0;
+  static constexpr uint32_t TEMP_DEBOUNCE_MS = 3000;
+
   uint8_t set_cmd_base[35] = {
     0xBB, 0x00, 0x01, 0x03, 0x1D,
     0x00, 0x00, 0x64, 0x03, 0xF3,

@@ -514,12 +514,11 @@ void TCLClimate::loop() {
         if (temp_settled) {
           memcpy(m_get_cmd_resp.raw, buffer, len);
         } else {
-          // Nur Nicht-Temperatur-Felder selektiv übernehmen:
-          // Wir kopieren alles außer dem temp-Nibble (Byte 7 Bits[3:0])
-          uint8_t saved_temp_byte = m_get_cmd_resp.raw[7];  // temp-Nibble sichern
+          // temp sitzt in raw[8] Bits[3:0] – dieses Nibble sichern,
+          // alle anderen Felder (Mode, Fan, Swing...) aus der AC-Antwort übernehmen.
+          uint8_t saved_temp_nibble = m_get_cmd_resp.raw[8] & 0x0F;  // temp[3:0] sichern
           memcpy(m_get_cmd_resp.raw, buffer, len);
-          // temp-Nibble aus unserem gesendeten Wert wiederherstellen
-          m_get_cmd_resp.raw[7] = (buffer[7] & 0xF0) | (saved_temp_byte & 0x0F);
+          m_get_cmd_resp.raw[8] = (buffer[8] & 0xF0) | saved_temp_nibble;  // fan-Nibble aus AC, temp aus uns
         }
 
         this->is_changed = false;

@@ -352,7 +352,11 @@ void TCLClimate::control(const climate::ClimateCall &call) {
   if (call.get_target_temperature().has_value()) {
     float temp = *call.get_target_temperature();
     this->target_temperature = temp;
-    temp_cmd_sent_ms_ = millis();  // Debounce-Timer starten
+    // Gesendeten Wert sofort in m_get_cmd_resp spiegeln, damit der
+    // Debounce-Mechanismus in loop() den richtigen Wert sichert.
+    uint8_t temp_nibble = static_cast<uint8_t>(temp) - 16;
+    m_get_cmd_resp.data.temp = temp_nibble & 0x0F;
+    temp_cmd_sent_ms_ = millis();
     should_build = true;
   }
 
@@ -502,6 +506,22 @@ void TCLClimate::loop() {
         print_hex_str(buffer, len);
 
         float curr_temp = ((static_cast<uint16_t>(buffer[17] << 8) | buffer[18]) / 374.0f - 32.0f) / 1.8f;
+
+        // Debounce: Solange ein eigener Temperaturbefehl kürzlich gesendet wurde,
+        // den AC-Rückgabewert für die Temperatur NICHT in m_get_cmd_resp übernehmen.
+        // Alle anderen Felder (Mode, Fan, Swing...) werden immer übernommen.
+        bool temp_settled = (millis() - temp_cmd_sent_ms_) > TEMP_DEBOUNCE_MS;
+        if (temp_settled) {
+          memcpy(m_get_cmd_resp.raw, buffer, len);
+        } else {
+          // Nur Nicht-Temperatur-Felder selektiv übernehmen:
+          // Wir kopieren alles außer dem temp-Nibble (Byte 7 Bits[3:0])
+          uint8_t saved_temp_byte = m_get_cmd_resp.raw[7];  // temp-Nibble sichern
+          memcpy(m_get_cmd_resp.raw, buffer, len);
+          // temp-Nibble aus unserem gesendeten Wert wiederherstellen
+          m_get_cmd_resp.raw[7] = (buffer[7] & 0xF0) | (saved_temp_byte & 0x0F);
+        }
+
         this->is_changed = false;
 
         // ── Betriebsmodus ────────────────────────────────────────────────────
@@ -592,11 +612,9 @@ void TCLClimate::loop() {
 
         this->set_current_temperature(curr_temp);
 
-        // Zieltemperatur nur übernehmen wenn kein eigener Befehl kürzlich gesendet wurde.
-        // Sonst würde der AC-Poll-Wert unsere frisch gesendete Temperatur überschreiben.
-        bool temp_settled = (millis() - temp_cmd_sent_ms_) > TEMP_DEBOUNCE_MS;
-        if (temp_settled)
-          this->set_target_temperature(static_cast<float>(m_get_cmd_resp.data.temp + 16));
+        // Zieltemperatur aus AC übernehmen (temp-Nibble ist im Debounce-Fall bereits
+        // auf unseren gesendeten Wert gesetzt, also immer korrekt lesbar)
+        this->set_target_temperature(static_cast<float>(m_get_cmd_resp.data.temp + 16));
 
         if (this->is_changed) this->publish_state();
       }

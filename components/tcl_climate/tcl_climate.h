@@ -60,7 +60,11 @@ class TCLClimate : public climate::Climate, public uart::UARTDevice, public Poll
       uint8_t byte_11;
       uint8_t byte_12;
       uint8_t byte_13;
-      uint8_t byte_14;
+
+      uint8_t byte_14_bit_0_4 : 5;
+      uint8_t half_degree : 1;
+      uint8_t byte_14_bit_6_7 : 2;
+
       uint8_t byte_15;
       uint8_t byte_16;
       uint8_t byte_17;

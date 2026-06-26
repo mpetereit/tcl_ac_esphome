@@ -352,10 +352,9 @@ void TCLClimate::control(const climate::ClimateCall &call) {
   if (call.get_target_temperature().has_value()) {
     float temp = *call.get_target_temperature();
     this->target_temperature = temp;
-    // In get_cmd_resp ist temp invertiert: temp = 31 - T (ganzzahlig)
-    // half_degree ist separat – hier nur den ganzzahligen Anteil spiegeln
-    uint8_t temp_int = static_cast<uint8_t>(temp);  // z.B. 23 bei 23.5°C
-    m_get_cmd_resp.data.temp = (31 - temp_int) & 0x0F;
+    // AC antwortet mit temp = T - 16 (direkt, nicht invertiert)
+    uint8_t temp_int = static_cast<uint8_t>(temp);
+    m_get_cmd_resp.data.temp = (temp_int - 16) & 0x0F;
     temp_cmd_sent_ms_ = millis();
     should_build = true;
   }
@@ -612,10 +611,9 @@ void TCLClimate::loop() {
         this->set_current_temperature(curr_temp);
 
         // Zieltemperatur aus AC übernehmen.
-        // In get_cmd_resp ist temp invertiert: T = 31 - temp
-        // half_degree ist Bit[5] in Byte 14 der Antwort
+        // AC kodiert temp als T - 16 in der Antwort (direkt, nicht invertiert)
         {
-          float ac_target = static_cast<float>(31 - m_get_cmd_resp.data.temp);
+          float ac_target = static_cast<float>(m_get_cmd_resp.data.temp + 16);
           if (m_get_cmd_resp.data.half_degree) ac_target += 0.5f;
           this->set_target_temperature(ac_target);
         }

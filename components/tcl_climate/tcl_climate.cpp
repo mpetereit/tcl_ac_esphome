@@ -351,8 +351,8 @@ void TCLClimate::control(const climate::ClimateCall &call) {
 
   if (call.get_target_temperature().has_value()) {
     float temp = *call.get_target_temperature();
-    // Temperatur wird direkt aus this->target_temperature in build_set_cmd gelesen
     this->target_temperature = temp;
+    temp_cmd_sent_ms_ = millis();  // Debounce-Timer starten
     should_build = true;
   }
 
@@ -590,8 +590,13 @@ void TCLClimate::loop() {
         else if (m_get_cmd_resp.data.hswing_fix == 0x05) set_hswing_pos("Fix right");
         else set_hswing_pos("Last position");
 
-        this->set_target_temperature(static_cast<float>(m_get_cmd_resp.data.temp + 16));
         this->set_current_temperature(curr_temp);
+
+        // Zieltemperatur nur übernehmen wenn kein eigener Befehl kürzlich gesendet wurde.
+        // Sonst würde der AC-Poll-Wert unsere frisch gesendete Temperatur überschreiben.
+        bool temp_settled = (millis() - temp_cmd_sent_ms_) > TEMP_DEBOUNCE_MS;
+        if (temp_settled)
+          this->set_target_temperature(static_cast<float>(m_get_cmd_resp.data.temp + 16));
 
         if (this->is_changed) this->publish_state();
       }

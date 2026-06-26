@@ -432,7 +432,7 @@ climate::ClimateTraits TCLClimate::traits() {
   });
   traits.set_visual_min_temperature(16.0);
   traits.set_visual_max_temperature(31.0);
-  traits.set_visual_target_temperature_step(0.5);  // ← 0.5°C Schritte aktiviert
+  traits.set_visual_target_temperature_step(1.0);  // Gerät unterstützt keine 0.5°C Schritte
   return traits;
 }
 

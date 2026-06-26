@@ -119,11 +119,11 @@ void TCLClimate::build_set_cmd(get_cmd_resp_t *get_cmd_resp) {
   if (get_cmd_resp->data.mode < sizeof(MODE_MAP))
     m_set_cmd.data.mode = MODE_MAP[get_cmd_resp->data.mode];
 
-  // Temperatur: ganzzahlig + halber Grad
+  // Temperatur: Im Set-Command ist temp ebenfalls invertiert kodiert: temp = 31 - T
   float target = this->target_temperature;
   uint8_t temp_int  = static_cast<uint8_t>(target);
   bool    half_deg  = (target - temp_int) >= 0.4f;
-  m_set_cmd.data.temp       = temp_int - 16;
+  m_set_cmd.data.temp        = 31 - temp_int;
   m_set_cmd.data.half_degree = half_deg ? 1 : 0;
 
   static constexpr uint8_t FAN_MAP[] = {
